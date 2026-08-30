@@ -18,12 +18,18 @@ jobs:
           cmake --build build64 --config Release
           copy build64\Release\*.dp64 package\x64\plugins\
 
+      - name: Test (x64)
+        run: ctest --test-dir build64 -C Release --output-on-failure
+
       - name: Build (x32)
         run: |
           mkdir package\x32\plugins
           cmake -B build32 -A Win32
           cmake --build build32 --config Release
           copy build32\Release\*.dp32 package\x32\plugins\
+
+      - name: Test (x32)
+        run: ctest --test-dir build32 -C Release --output-on-failure
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

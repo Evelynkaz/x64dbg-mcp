@@ -26,6 +26,13 @@ target_compile_definitions(x64dbg-mcp PRIVATE
     PLUGIN_VERSION_STR="${PROJECT_VERSION}"
 )
 
+# Вендоренные header-only зависимости. Версии и лицензии — third_party/README.md.
+add_library(nlohmann_json INTERFACE)
+target_include_directories(nlohmann_json INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+
+add_library(doctest INTERFACE)
+target_include_directories(doctest INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+
 # Подопытная программа для ручной проверки инструментов.
 # Собирается только по явному запросу: cmake -B build64 -A x64 -DX64DBG_MCP_BUILD_TARGET=ON
 option(X64DBG_MCP_BUILD_TARGET "Собрать подопытную программу для ручных проверок" OFF)
@@ -39,4 +46,17 @@ if(X64DBG_MCP_BUILD_TARGET)
     set_target_properties(crackme PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION OFF
     )
+endif()
+
+# Юнит-тесты. Не требуют запущенного x64dbg и не линкуются с его SDK.
+option(X64DBG_MCP_BUILD_TESTS "Собрать юнит-тесты" ON)
+
+if(X64DBG_MCP_BUILD_TESTS)
+    enable_testing()
+    add_executable(x64dbg-mcp-tests
+        tests/unit/test_main.cpp
+        tests/unit/test_smoke.cpp
+    )
+    target_link_libraries(x64dbg-mcp-tests PRIVATE nlohmann_json doctest)
+    add_test(NAME unit COMMAND x64dbg-mcp-tests)
 endif()
