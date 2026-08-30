@@ -33,6 +33,16 @@ target_include_directories(nlohmann_json INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/t
 add_library(doctest INTERFACE)
 target_include_directories(doctest INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
+# Общий код моста и плагина: формат обмена, разбор кадров.
+# Не зависит ни от Windows API, ни от SDK x64dbg — поэтому тестируется отдельно.
+add_library(x64dbg-mcp-common STATIC
+    src/common/framing.h
+    src/common/framing.cpp
+    src/common/ipc_protocol.h
+)
+target_include_directories(x64dbg-mcp-common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(x64dbg-mcp-common PUBLIC nlohmann_json)
+
 # Подопытная программа для ручной проверки инструментов.
 # Собирается только по явному запросу: cmake -B build64 -A x64 -DX64DBG_MCP_BUILD_TARGET=ON
 option(X64DBG_MCP_BUILD_TARGET "Собрать подопытную программу для ручных проверок" OFF)
@@ -56,7 +66,8 @@ if(X64DBG_MCP_BUILD_TESTS)
     add_executable(x64dbg-mcp-tests
         tests/unit/test_main.cpp
         tests/unit/test_smoke.cpp
+        tests/unit/test_framing.cpp
     )
-    target_link_libraries(x64dbg-mcp-tests PRIVATE nlohmann_json doctest)
+    target_link_libraries(x64dbg-mcp-tests PRIVATE nlohmann_json doctest x64dbg-mcp-common)
     add_test(NAME unit COMMAND x64dbg-mcp-tests)
 endif()
