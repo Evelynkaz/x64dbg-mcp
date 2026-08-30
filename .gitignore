@@ -1,0 +1,42 @@
+# Клонированные чужие исходники и SDK
+external/
+
+# Артефакты сборки
+build/
+build*/
+out/
+cmake-build-*/
+CMakeUserPresets.json
+CMakeSettings.json
+
+# IDE
+.vs/
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.user
+*.sln
+*.vcxproj*
+
+# Бинарники плагина и подопытных программ
+*.dp64
+*.dp32
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+# Примечание: вендоренные .lib из SDK в репозиторий не попадают вовсе
+# (SDK не вендорится, а скачивается при конфигурации CMake), поэтому
+# глобальный игнор .lib безопасен и не затрагивает версионируемые файлы.
+
+# Локальные конфиги и логи
+*.log
+x64dbg-mcp.ini
+.env
+
+# Прочее
+Thumbs.db
+desktop.ini
