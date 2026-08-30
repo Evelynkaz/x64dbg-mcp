@@ -39,9 +39,16 @@ add_library(x64dbg-mcp-common STATIC
     src/common/framing.h
     src/common/framing.cpp
     src/common/ipc_protocol.h
+    src/common/pipe_server.h
+    src/common/pipe_server.cpp
+    src/common/pipe_client.h
+    src/common/pipe_client.cpp
 )
 target_include_directories(x64dbg-mcp-common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(x64dbg-mcp-common PUBLIC nlohmann_json)
+# Advapi32: ConvertStringSecurityDescriptorToSecurityDescriptorA в pipe_server.cpp
+# (явные права доступа к именованному каналу).
+target_link_libraries(x64dbg-mcp-common PRIVATE Advapi32)
 
 # Ядро MCP-сервера. Не содержит ввода-вывода, поэтому тестируется отдельно.
 add_library(x64dbg-mcp-bridge-core STATIC
@@ -90,6 +97,7 @@ if(X64DBG_MCP_BUILD_TESTS)
         tests/unit/test_smoke.cpp
         tests/unit/test_framing.cpp
         tests/unit/test_mcp_server.cpp
+        tests/unit/test_pipe.cpp
     )
     target_link_libraries(x64dbg-mcp-tests PRIVATE nlohmann_json doctest x64dbg-mcp-common x64dbg-mcp-bridge-core)
     add_test(NAME unit COMMAND x64dbg-mcp-tests)
