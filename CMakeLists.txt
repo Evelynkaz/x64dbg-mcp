@@ -43,6 +43,28 @@ add_library(x64dbg-mcp-common STATIC
 target_include_directories(x64dbg-mcp-common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(x64dbg-mcp-common PUBLIC nlohmann_json)
 
+# Ядро MCP-сервера. Не содержит ввода-вывода, поэтому тестируется отдельно.
+add_library(x64dbg-mcp-bridge-core STATIC
+    src/bridge/logging.h
+    src/bridge/logging.cpp
+    src/bridge/tool_registry.h
+    src/bridge/tool_registry.cpp
+    src/bridge/mcp_server.h
+    src/bridge/mcp_server.cpp
+)
+target_include_directories(x64dbg-mcp-bridge-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(x64dbg-mcp-bridge-core PUBLIC nlohmann_json x64dbg-mcp-common)
+target_compile_definitions(x64dbg-mcp-bridge-core PUBLIC SERVER_VERSION_STR="${PROJECT_VERSION}")
+
+# Исполняемый файл сервера: транспорт stdio поверх ядра протокола.
+add_executable(x64dbg-mcp-server
+    src/bridge/main.cpp
+    src/bridge/stdio_transport.h
+    src/bridge/stdio_transport.cpp
+)
+set_target_properties(x64dbg-mcp-server PROPERTIES OUTPUT_NAME "x64dbg-mcp")
+target_link_libraries(x64dbg-mcp-server PRIVATE x64dbg-mcp-bridge-core)
+
 # Подопытная программа для ручной проверки инструментов.
 # Собирается только по явному запросу: cmake -B build64 -A x64 -DX64DBG_MCP_BUILD_TARGET=ON
 option(X64DBG_MCP_BUILD_TARGET "Собрать подопытную программу для ручных проверок" OFF)
@@ -67,7 +89,8 @@ if(X64DBG_MCP_BUILD_TESTS)
         tests/unit/test_main.cpp
         tests/unit/test_smoke.cpp
         tests/unit/test_framing.cpp
+        tests/unit/test_mcp_server.cpp
     )
-    target_link_libraries(x64dbg-mcp-tests PRIVATE nlohmann_json doctest x64dbg-mcp-common)
+    target_link_libraries(x64dbg-mcp-tests PRIVATE nlohmann_json doctest x64dbg-mcp-common x64dbg-mcp-bridge-core)
     add_test(NAME unit COMMAND x64dbg-mcp-tests)
 endif()
