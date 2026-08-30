@@ -14,10 +14,10 @@ namespace
 void PrintHelp()
 {
     std::cerr <<
-        "x64dbg-mcp: MCP-сервер для отладчика x64dbg (транспорт stdio)\n"
-        "Использование: x64dbg-mcp [--log-level <error|warn|info|debug>] [--help]\n"
-        "  --log-level <уровень>  минимальный уровень журнала в stderr (по умолчанию info)\n"
-        "  --help                 показать эту справку и выйти\n";
+        "x64dbg-mcp: MCP server for the x64dbg debugger (stdio transport)\n"
+        "Usage: x64dbg-mcp [--log-level <error|warn|info|debug>] [--help]\n"
+        "  --log-level <level>  minimum log level written to stderr (default: info)\n"
+        "  --help                show this help message and exit\n";
 }
 
 bool ParseLogLevel(const std::string& value, LogLevel& out)
@@ -51,19 +51,19 @@ int main(int argc, char** argv)
             {
                 if (i + 1 >= argc)
                 {
-                    std::cerr << "--log-level требует значение\n";
+                    std::cerr << "--log-level requires a value\n";
                     return 1;
                 }
                 const std::string value = argv[++i];
                 if (!ParseLogLevel(value, level))
                 {
-                    std::cerr << "Неизвестный уровень журнала: " << value << "\n";
+                    std::cerr << "Unknown log level: " << value << "\n";
                     return 1;
                 }
             }
             else
             {
-                std::cerr << "Неизвестный аргумент: " << arg << "\n";
+                std::cerr << "Unknown argument: " << arg << "\n";
                 return 1;
             }
         }
@@ -76,12 +76,12 @@ int main(int argc, char** argv)
     }
     catch (const std::exception& e)
     {
-        Log(LogLevel::Error, std::string("Необработанное исключение: ") + e.what());
+        Log(LogLevel::Error, std::string("Unhandled exception: ") + e.what());
         return 1;
     }
     catch (...)
     {
-        Log(LogLevel::Error, "Необработанное исключение неизвестного типа");
+        Log(LogLevel::Error, "Unhandled exception of unknown type");
         return 1;
     }
 }

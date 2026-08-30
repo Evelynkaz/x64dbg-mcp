@@ -170,7 +170,7 @@ nlohmann::json McpServer::HandleToolsCall(const nlohmann::json& params) const
     // Malformed request по классификации спецификации MCP — ошибка протокола,
     // а не результат вызова инструмента.
     if (!params.is_object() || !params.contains("name") || !params["name"].is_string())
-        throw ProtocolError{ -32602, "params.name должен присутствовать и быть строкой с именем инструмента" };
+        throw ProtocolError{ -32602, "params.name must be present and must be a string containing the tool name" };
 
     const std::string name = params["name"].get<std::string>();
 
@@ -178,7 +178,7 @@ nlohmann::json McpServer::HandleToolsCall(const nlohmann::json& params) const
     if (params.contains("arguments"))
     {
         if (!params["arguments"].is_object())
-            throw ProtocolError{ -32602, "params.arguments должен быть объектом" };
+            throw ProtocolError{ -32602, "params.arguments must be an object" };
         arguments = params["arguments"];
     }
 
@@ -215,7 +215,7 @@ nlohmann::json McpServer::HandleToolsCall(const nlohmann::json& params) const
         return nlohmann::json{
             {"isError", true},
             {"content", nlohmann::json::array({
-                { {"type", "text"}, {"text", "Внутренняя ошибка при выполнении инструмента"} }
+                { {"type", "text"}, {"text", "Internal error while executing the tool"} }
             })}
         };
     }
@@ -227,9 +227,9 @@ nlohmann::json McpServer::HandleDiscover() const
         {"supportedVersions", nlohmann::json::array({ kModernVersion })},
         {"capabilities", {{"tools", nlohmann::json::object()}}},
         {"instructions",
-            "Сервер предоставляет доступ к отладчику x64dbg для реверс-инжиниринга: "
-            "инспекция процесса, точки останова, дизассемблирование и память "
-            "отлаживаемой программы."}
+            "This server provides access to the x64dbg debugger for reverse "
+            "engineering: process inspection, breakpoints, disassembly, and "
+            "memory of the debugged program."}
     };
     ApplyModernEnvelope(result);
     return result;
@@ -304,7 +304,7 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
             if (!meta.contains(kMetaProtocolVersion) || !meta[kMetaProtocolVersion].is_string())
             {
                 return MakeErrorResponse(id, -32602,
-                    std::string("Отсутствует обязательное поле params._meta[\"") +
+                    std::string("Missing required field params._meta[\"") +
                     kMetaProtocolVersion + "\"]").dump();
             }
 
@@ -312,7 +312,7 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
             {
                 return MakeErrorResponse(id, -32602,
                     std::string("params._meta[\"") + kMetaClientCapabilities +
-                    "\"] должен присутствовать и быть объектом").dump();
+                    "\"] must be present and must be an object").dump();
             }
 
             const std::string requestedVersion = meta[kMetaProtocolVersion].get<std::string>();

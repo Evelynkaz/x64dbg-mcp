@@ -48,11 +48,11 @@ ToolRegistry CreateDefaultRegistry()
     Tool serverStatus;
     serverStatus.name = "server_status";
     serverStatus.description =
-        "Сообщает версию MCP-сервера x64dbg-mcp и состояние соединения с плагином, "
-        "работающим внутри x64dbg. Не требует подключения к отладчику. Используйте "
-        "этот инструмент первым, когда любой другой инструмент вернул ошибку "
-        "соединения, чтобы понять, запущен ли x64dbg с установленным плагином "
-        "x64dbg-mcp, прежде чем разбираться, что пошло не так, дальше.";
+        "Reports the version of the x64dbg-mcp server and the connection state "
+        "with the plugin running inside x64dbg. Does not require an active "
+        "debugging session. Call this tool first whenever another tool returns "
+        "a connection error, to check whether x64dbg is running with the "
+        "x64dbg-mcp plugin installed before investigating further.";
     serverStatus.inputSchema = {
         {"$schema", "https://json-schema.org/draft/2020-12/schema"},
         {"type", "object"},

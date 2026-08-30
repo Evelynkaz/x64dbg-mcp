@@ -40,7 +40,7 @@ void RunStdioLoop(McpServer& server)
         std::cout.flush();
     }
 
-    Log(LogLevel::Info, "stdin закрыт (EOF), завершение работы");
+    Log(LogLevel::Info, "stdin closed (EOF), shutting down");
 }
 
 } // namespace x64dbg_mcp::bridge
