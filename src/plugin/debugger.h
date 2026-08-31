@@ -9,6 +9,8 @@
 // произвольного потока (см. docs/notes/x64dbg-api.md), а сериализация через
 // единственный рабочий поток — единственная защита от этого класса гонок.
 
+#include "nlohmann/json.hpp"
+
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -53,5 +55,52 @@ struct Instruction
 
 // Дизассемблирование count инструкций начиная с address.
 bool Disassemble(unsigned long long address, size_t count, std::vector<Instruction>& out, std::string& error);
+
+// Таймаут по умолчанию для операций, ожидающих паузу отладчика, и его верхний предел.
+constexpr int kDefaultControlTimeoutMs = 10000;
+constexpr int kMaxControlTimeoutMs = 300000;
+
+// Результат операции, меняющей состояние выполнения.
+struct ControlResult
+{
+    bool paused = false;        // остановился ли процесс в отведённое время
+    bool timedOut = false;      // истекло ожидание
+    DebuggerStatus status;      // состояние ПОСЛЕ операции
+    std::string pauseReason;    // причина остановки: breakpoint, step, pause, initial, exception, unknown
+};
+
+// action: run | pause | stop | restart | run_to
+bool Control(const std::string& action, unsigned long long address, bool hasAddress,
+             bool wait, int timeoutMs, ControlResult& out, std::string& error);
+
+// mode: into | over | out
+bool Step(const std::string& mode, int count, bool wait, int timeoutMs,
+          ControlResult& out, std::string& error);
+
+// Ожидание остановки без отправки команды.
+bool WaitUntilPaused(int timeoutMs, ControlResult& out, std::string& error);
+
+// Сведения об одной установленной точке останова.
+struct BreakpointInfo
+{
+    unsigned long long address = 0;
+    std::string type;        // software | hardware | memory | dll | exception
+    bool enabled = false;
+    bool singleShot = false;
+    unsigned int hitCount = 0;
+    std::string module;
+    std::string name;
+};
+
+// Устанавливает точку останова по описанию из params (см. debugger.cpp за
+// перечнем допустимых полей). Возвращает false и понятную ошибку, если
+// какая-либо из команд не была принята x64dbg.
+bool SetBreakpoint(const nlohmann::json& params, std::string& error);
+
+// action: delete | enable | disable
+bool ManageBreakpoint(const std::string& action, unsigned long long address, std::string& error);
+
+// Список всех установленных точек останова всех типов.
+bool ListBreakpoints(std::vector<BreakpointInfo>& out, std::string& error);
 
 } // namespace x64dbg_mcp::plugin

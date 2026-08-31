@@ -1,8 +1,143 @@
 #include "plugin/debugger.h"
 #include "plugin/plugin.h"
+#include "plugin/service.h"
+#include "pluginsdk/_scriptapi_module.h"
+
+#include <chrono>
+#include <sstream>
+#include <thread>
 
 namespace x64dbg_mcp::plugin
 {
+
+namespace
+{
+
+// Приводит timeoutMs к диапазону по умолчанию: <=0 значит "не задан" —
+// подставляется значение по умолчанию, а всё, что превышает верхний
+// предел, обрезается до него.
+int ClampTimeout(int timeoutMs)
+{
+    if (timeoutMs <= 0)
+        return kDefaultControlTimeoutMs;
+    if (timeoutMs > kMaxControlTimeoutMs)
+        return kMaxControlTimeoutMs;
+    return timeoutMs;
+}
+
+// ВАЖНО: в командах x64dbg аргументы разделяются ЗАПЯТОЙ, а не пробелом —
+// пробелом отделяется только имя команды от первого аргумента (см.
+// комментарий "arguments are separated by a COMMA (not space like WinDbg)"
+// в external/PluginTemplate/src/plugin.cpp и разбор argv[] по запятой в
+// external/x64dbg/src/dbg/commands/cmd-breakpoint-control.cpp). Команды с
+// одним аргументом (StepInto, StepOut, run, DeleteBPX и т.п.) этого не
+// затрагивают — разделять внутри одного аргумента нечего.
+
+// Адреса в командах x64dbg передаются в шестнадцатеричном виде.
+std::string FormatHexAddress(unsigned long long address)
+{
+    std::ostringstream out;
+    out << "0x" << std::hex << address;
+    return out.str();
+}
+
+std::string PauseReasonToString(PauseReason reason)
+{
+    switch (reason)
+    {
+    case PauseReason::InitialBreak: return "initial";
+    case PauseReason::Breakpoint: return "breakpoint";
+    case PauseReason::Step: return "step";
+    case PauseReason::UserPause: return "pause";
+    case PauseReason::Exception: return "exception";
+    default: return "unknown";
+    }
+}
+
+// Общий хвост операций, отправивших асинхронную команду и опционально
+// ждущих последующую паузу: заполняет ControlResult по результату ожидания
+// (или немедленно, если ожидание не требуется).
+bool FinishWithWait(DebugStateTracker& tracker, unsigned long long beforeGeneration,
+                     bool wait, int timeoutMs, ControlResult& out)
+{
+    if (!wait)
+    {
+        out.paused = false;
+        out.timedOut = false;
+        out.pauseReason.clear();
+        out.status = GetStatus();
+        return true;
+    }
+
+    StateSnapshot after;
+    const bool paused = tracker.WaitForPauseAfter(beforeGeneration, timeoutMs, after);
+    out.paused = paused;
+    out.timedOut = !paused;
+    out.pauseReason = paused ? PauseReasonToString(after.reason) : std::string();
+    out.status = GetStatus();
+    return true;
+}
+
+bool RequireDebugging(std::string& error)
+{
+    if (!DbgIsDebugging())
+    {
+        error = "Debugging is not active: open or attach to a process in x64dbg first";
+        return false;
+    }
+    return true;
+}
+
+// Читает необязательное строковое поле. Возвращает false, если поле есть,
+// но имеет неверный тип.
+bool GetOptionalString(const nlohmann::json& params, const char* name, std::string& out, std::string& error)
+{
+    if (!params.contains(name))
+        return true;
+    if (!params[name].is_string())
+    {
+        error = std::string("Parameter \"") + name + "\" must be a string";
+        return false;
+    }
+    out = params[name].get<std::string>();
+    return true;
+}
+
+bool GetOptionalBool(const nlohmann::json& params, const char* name, bool& out, std::string& error)
+{
+    if (!params.contains(name))
+        return true;
+    if (!params[name].is_boolean())
+    {
+        error = std::string("Parameter \"") + name + "\" must be a boolean";
+        return false;
+    }
+    out = params[name].get<bool>();
+    return true;
+}
+
+void CollectBpFieldText(const BP_REF& ref, BP_FIELD field, std::string& out)
+{
+    DbgFunctions()->BpGetFieldText(&ref, field, [](const char* str, void* userdata)
+    {
+        *static_cast<std::string*>(userdata) = str;
+    }, &out);
+}
+
+std::string BpxTypeToString(BPXTYPE type)
+{
+    switch (type)
+    {
+    case bp_normal: return "software";
+    case bp_hardware: return "hardware";
+    case bp_memory: return "memory";
+    case bp_dll: return "dll";
+    case bp_exception: return "exception";
+    default: return "unknown";
+    }
+}
+
+} // namespace
 
 DebuggerStatus GetStatus()
 {
@@ -147,6 +282,510 @@ bool Disassemble(unsigned long long address, size_t count, std::vector<Instructi
     catch (...)
     {
         error = "Internal error while disassembling";
+        return false;
+    }
+}
+
+bool Control(const std::string& action, unsigned long long address, bool hasAddress,
+             bool wait, int timeoutMs, ControlResult& out, std::string& error)
+{
+    out = ControlResult{};
+    try
+    {
+        const int clampedTimeout = ClampTimeout(timeoutMs);
+        auto& tracker = McpService::Instance().Tracker();
+
+        if (action == "run" || action == "run_to")
+        {
+            if (!RequireDebugging(error))
+                return false;
+            if (action == "run_to" && !hasAddress)
+            {
+                error = "Action \"run_to\" requires an \"address\" parameter";
+                return false;
+            }
+            const auto before = tracker.Current().generation;
+            const std::string cmd = hasAddress ? ("run " + FormatHexAddress(address)) : "run";
+            DbgCmdExec(cmd.c_str());
+            return FinishWithWait(tracker, before, wait, clampedTimeout, out);
+        }
+
+        if (action == "pause")
+        {
+            if (!RequireDebugging(error))
+                return false;
+            const auto before = tracker.Current().generation;
+            DbgCmdExec("pause");
+            return FinishWithWait(tracker, before, wait, clampedTimeout, out);
+        }
+
+        if (action == "stop")
+        {
+            if (!RequireDebugging(error))
+                return false;
+            DbgCmdExec("StopDebug");
+            // "stop" не переводит процесс в паузу, поэтому WaitForPauseAfter
+            // здесь неприменим — просто отдаём состояние сразу после отправки команды.
+            out.paused = false;
+            out.timedOut = false;
+            out.pauseReason.clear();
+            out.status = GetStatus();
+            return true;
+        }
+
+        if (action == "restart")
+        {
+            if (!RequireDebugging(error))
+                return false;
+
+            char pathBuf[MAX_PATH] = {};
+            if (!Script::Module::GetMainModulePath(pathBuf))
+            {
+                error = "Failed to determine the path of the main module: cannot restart";
+                return false;
+            }
+            const std::string path = pathBuf;
+
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(clampedTimeout);
+            DbgCmdExec("StopDebug");
+
+            // Ждём именно ОТСУТСТВИЯ сессии отладки, а не паузы: в DebugStateTracker
+            // есть уведомление о завершении отладки, но само по себе оно не гарантирует,
+            // что процесс уже завершился и путь свободен для повторной загрузки —
+            // поэтому опрашиваем DbgIsDebugging() напрямую с небольшим шагом.
+            while (DbgIsDebugging())
+            {
+                if (std::chrono::steady_clock::now() >= deadline)
+                {
+                    out.timedOut = true;
+                    out.paused = false;
+                    out.status = GetStatus();
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+
+            const auto before = tracker.Current().generation;
+            const std::string cmd = "InitDebug \"" + path + "\"";
+            DbgCmdExec(cmd.c_str());
+
+            if (!wait)
+            {
+                out.paused = false;
+                out.timedOut = false;
+                out.pauseReason.clear();
+                out.status = GetStatus();
+                return true;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            const int remainingMs = now >= deadline ? 0 : static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+            return FinishWithWait(tracker, before, true, remainingMs, out);
+        }
+
+        error = "Unknown control action \"" + action + "\": expected one of run, pause, stop, restart, run_to";
+        return false;
+    }
+    catch (...)
+    {
+        error = "Internal error while controlling the debugger";
+        return false;
+    }
+}
+
+bool Step(const std::string& mode, int count, bool wait, int timeoutMs,
+          ControlResult& out, std::string& error)
+{
+    out = ControlResult{};
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+        if (DbgIsRunning())
+        {
+            error = "The process is currently running: pause it before stepping";
+            return false;
+        }
+        if (count < 1 || count > 1000)
+        {
+            error = "Step count must be between 1 and 1000";
+            return false;
+        }
+
+        const int clampedTimeout = ClampTimeout(timeoutMs);
+        auto& tracker = McpService::Instance().Tracker();
+
+        if (mode == "into")
+        {
+            const auto before = tracker.Current().generation;
+            DbgCmdExec(("StepInto " + std::to_string(count)).c_str());
+            return FinishWithWait(tracker, before, wait, clampedTimeout, out);
+        }
+
+        if (mode == "out")
+        {
+            const auto before = tracker.Current().generation;
+            DbgCmdExec(("StepOut " + std::to_string(count)).c_str());
+            return FinishWithWait(tracker, before, wait, clampedTimeout, out);
+        }
+
+        if (mode == "over")
+        {
+            // StepOver не принимает количество шагов, поэтому повторяем команду
+            // в цикле, каждый раз дожидаясь фактической остановки перед
+            // следующей итерацией — иначе шаги отправятся в очередь, не
+            // дожидаясь друг друга, и часть из них будет потеряна или
+            // выполнена не с того места.
+            for (int i = 0; i < count; ++i)
+            {
+                const auto before = tracker.Current().generation;
+                DbgCmdExec("StepOver");
+                StateSnapshot after;
+                const bool paused = tracker.WaitForPauseAfter(before, clampedTimeout, after);
+                out.status = GetStatus();
+                if (!paused)
+                {
+                    out.paused = false;
+                    out.timedOut = true;
+                    out.pauseReason.clear();
+                    return true;
+                }
+                out.paused = true;
+                out.timedOut = false;
+                out.pauseReason = PauseReasonToString(after.reason);
+            }
+            return true;
+        }
+
+        error = "Unknown step mode \"" + mode + "\": expected one of into, over, out";
+        return false;
+    }
+    catch (...)
+    {
+        error = "Internal error while stepping";
+        return false;
+    }
+}
+
+bool WaitUntilPaused(int timeoutMs, ControlResult& out, std::string& error)
+{
+    out = ControlResult{};
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        const int clampedTimeout = ClampTimeout(timeoutMs);
+        auto& tracker = McpService::Instance().Tracker();
+
+        // Если процесс уже стоит на паузе, возвращаемся немедленно: ждать
+        // поколение "строго больше текущего" здесь не нужно — текущая пауза
+        // и есть та, которую ожидает вызывающий.
+        const StateSnapshot current = tracker.Current();
+        if (current.state == RunState::Paused)
+        {
+            out.paused = true;
+            out.timedOut = false;
+            out.pauseReason = PauseReasonToString(current.reason);
+            out.status = GetStatus();
+            return true;
+        }
+
+        return FinishWithWait(tracker, current.generation, true, clampedTimeout, out);
+    }
+    catch (...)
+    {
+        error = "Internal error while waiting for a pause";
+        return false;
+    }
+}
+
+bool SetBreakpoint(const nlohmann::json& params, std::string& error)
+{
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+        if (!params.is_object() || !params.contains("address") || !params["address"].is_number_integer())
+        {
+            error = "Parameter \"address\" is required and must be an integer";
+            return false;
+        }
+        const unsigned long long address = params["address"].get<unsigned long long>();
+
+        std::string type = "software";
+        if (!GetOptionalString(params, "type", type, error))
+            return false;
+
+        std::string name;
+        if (!GetOptionalString(params, "name", name, error))
+            return false;
+
+        std::string cmd;
+        BPXTYPE bpType = bp_normal;
+        if (type == "software")
+        {
+            bpType = bp_normal;
+            cmd = "SetBPX " + FormatHexAddress(address);
+            if (!name.empty())
+                cmd += ", \"" + name + "\"";
+        }
+        else if (type == "hardware")
+        {
+            bpType = bp_hardware;
+            std::string access = "x";
+            if (!GetOptionalString(params, "access", access, error))
+                return false;
+            if (access != "r" && access != "w" && access != "x")
+            {
+                error = "Parameter \"access\" for a hardware breakpoint must be one of r, w, x";
+                return false;
+            }
+            long long size = 1;
+            if (params.contains("size"))
+            {
+                if (!params["size"].is_number_integer())
+                {
+                    error = "Parameter \"size\" must be an integer";
+                    return false;
+                }
+                size = params["size"].get<long long>();
+                if (size != 1 && size != 2 && size != 4 && size != 8)
+                {
+                    error = "Parameter \"size\" for a hardware breakpoint must be one of 1, 2, 4, 8";
+                    return false;
+                }
+            }
+            cmd = "SetHardwareBreakpoint " + FormatHexAddress(address) + ", " + access + ", " + std::to_string(size);
+        }
+        else if (type == "memory")
+        {
+            bpType = bp_memory;
+            cmd = "SetMemoryBPX " + FormatHexAddress(address);
+            if (params.contains("restore"))
+            {
+                bool restore = false;
+                if (!GetOptionalBool(params, "restore", restore, error))
+                    return false;
+                cmd += restore ? ", 1" : ", 0";
+            }
+            if (params.contains("access"))
+            {
+                std::string access;
+                if (!GetOptionalString(params, "access", access, error))
+                    return false;
+                if (access != "a" && access != "r" && access != "w" && access != "x")
+                {
+                    error = "Parameter \"access\" for a memory breakpoint must be one of a, r, w, x";
+                    return false;
+                }
+                cmd += ", " + access;
+            }
+        }
+        else
+        {
+            error = "Unknown breakpoint type \"" + type + "\": expected one of software, hardware, memory";
+            return false;
+        }
+
+        if (!DbgCmdExecDirect(cmd.c_str()))
+        {
+            error = "Failed to set the breakpoint: the debugger rejected \"" + cmd + "\"";
+            return false;
+        }
+
+        // Дополнительные настройки применяются отдельными командами к уже
+        // созданной точке останова, поэтому её сперва нужно найти по адресу.
+        BP_REF ref{};
+        if (!DbgFunctions()->BpRefVa(&ref, bpType, static_cast<duint>(address)))
+        {
+            error = "Breakpoint was created but could not be located afterwards to apply additional settings";
+            return false;
+        }
+
+        if (type != "software" && !name.empty())
+        {
+            if (!ref.SetField(bpf_name, name))
+            {
+                error = "Failed to set the breakpoint name";
+                return false;
+            }
+        }
+
+        std::string condition;
+        if (!GetOptionalString(params, "condition", condition, error))
+            return false;
+        if (params.contains("condition"))
+        {
+            const std::string cmd2 = "SetBreakpointCondition " + FormatHexAddress(address) + ", " + condition;
+            if (!DbgCmdExecDirect(cmd2.c_str()))
+            {
+                error = "Failed to set the breakpoint condition";
+                return false;
+            }
+        }
+
+        std::string log;
+        if (!GetOptionalString(params, "log", log, error))
+            return false;
+        if (params.contains("log"))
+        {
+            const std::string cmd2 = "SetBreakpointLog " + FormatHexAddress(address) + ", " + log;
+            if (!DbgCmdExecDirect(cmd2.c_str()))
+            {
+                error = "Failed to set the breakpoint log text";
+                return false;
+            }
+        }
+
+        std::string logCondition;
+        if (!GetOptionalString(params, "log_condition", logCondition, error))
+            return false;
+        if (params.contains("log_condition"))
+        {
+            const std::string cmd2 = "SetBreakpointLogCondition " + FormatHexAddress(address) + ", " + logCondition;
+            if (!DbgCmdExecDirect(cmd2.c_str()))
+            {
+                error = "Failed to set the breakpoint log condition";
+                return false;
+            }
+        }
+
+        if (params.contains("singleshoot"))
+        {
+            bool singleshoot = false;
+            if (!GetOptionalBool(params, "singleshoot", singleshoot, error))
+                return false;
+            const std::string cmd2 = "SetBreakpointSingleshoot " + FormatHexAddress(address) + ", " +
+                (singleshoot ? "1" : "0");
+            if (!DbgCmdExecDirect(cmd2.c_str()))
+            {
+                error = "Failed to set the breakpoint singleshoot flag";
+                return false;
+            }
+        }
+
+        if (params.contains("silent"))
+        {
+            bool silent = false;
+            if (!GetOptionalBool(params, "silent", silent, error))
+                return false;
+            const std::string cmd2 = "SetBreakpointSilent " + FormatHexAddress(address) + ", " + (silent ? "1" : "0");
+            if (!DbgCmdExecDirect(cmd2.c_str()))
+            {
+                error = "Failed to set the breakpoint silent flag";
+                return false;
+            }
+        }
+
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while setting the breakpoint";
+        return false;
+    }
+}
+
+bool ManageBreakpoint(const std::string& action, unsigned long long address, std::string& error)
+{
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        std::string cmdName;
+        if (action == "delete")
+            cmdName = "DeleteBPX";
+        else if (action == "enable")
+            cmdName = "EnableBPX";
+        else if (action == "disable")
+            cmdName = "DisableBPX";
+        else
+        {
+            error = "Unknown breakpoint action \"" + action + "\": expected one of delete, enable, disable";
+            return false;
+        }
+
+        const std::string cmd = cmdName + " " + FormatHexAddress(address);
+        if (!DbgCmdExecDirect(cmd.c_str()))
+        {
+            error = "Failed to " + action + " the breakpoint at the given address";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while managing the breakpoint";
+        return false;
+    }
+}
+
+bool ListBreakpoints(std::vector<BreakpointInfo>& out, std::string& error)
+{
+    out.clear();
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->BpRefList || !functions->BpGetFieldNumber || !functions->BpGetFieldText)
+        {
+            error = "Breakpoint listing is not supported by this x64dbg build";
+            return false;
+        }
+
+        duint count = 0;
+        BP_REF* refs = functions->BpRefList(&count);
+
+        // BpRefList выделяет память через BridgeAlloc (см. реализацию в
+        // external/x64dbg/src/dbg/_dbgfunctions.cpp); эталонный потребитель
+        // этой же функции внутри самого x64dbg — src/gui/Src/Gui/BreakpointsView.cpp —
+        // освобождает результат строго через BridgeFree, поэтому делаем так же.
+        struct RefsGuard
+        {
+            BP_REF* ptr;
+            ~RefsGuard() { if (ptr) BridgeFree(ptr); }
+        } guard{refs};
+
+        out.reserve(count);
+        for (duint i = 0; i < count; ++i)
+        {
+            const BP_REF& ref = refs[i];
+            BreakpointInfo info;
+
+            duint address = 0;
+            if (functions->BpGetFieldNumber(&ref, bpf_address, &address))
+                info.address = static_cast<unsigned long long>(address);
+
+            info.type = BpxTypeToString(ref.type);
+
+            duint enabled = 0;
+            if (functions->BpGetFieldNumber(&ref, bpf_enabled, &enabled))
+                info.enabled = enabled != 0;
+
+            duint singleShot = 0;
+            if (functions->BpGetFieldNumber(&ref, bpf_singleshoot, &singleShot))
+                info.singleShot = singleShot != 0;
+
+            duint hitCount = 0;
+            if (functions->BpGetFieldNumber(&ref, bpf_hitcount, &hitCount))
+                info.hitCount = static_cast<unsigned int>(hitCount);
+
+            CollectBpFieldText(ref, bpf_module, info.module);
+            CollectBpFieldText(ref, bpf_name, info.name);
+
+            out.push_back(std::move(info));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        error = "Internal error while listing breakpoints";
         return false;
     }
 }

@@ -8,8 +8,10 @@
 namespace x64dbg_mcp::bridge
 {
 
-// Регистрирует три инструмента отладчика: debugger_status, read_memory и
-// disassemble. Каждый обращается к плагину x64dbg через link.
+// Регистрирует девять инструментов отладчика: debugger_status, read_memory,
+// disassemble, debug_control, step, wait_until_paused, set_breakpoint,
+// manage_breakpoint и list_breakpoints. Каждый обращается к плагину x64dbg
+// через link.
 void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> link);
 
 } // namespace x64dbg_mcp::bridge

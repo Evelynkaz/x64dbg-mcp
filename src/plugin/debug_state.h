@@ -13,14 +13,18 @@ enum class RunState
     Paused,         // процесс остановлен
 };
 
+// Порядок значений ЗНАЧИМ: он задаёт приоритет причины остановки в пределах
+// одной физической паузы (см. NotifyPaused) — от менее определённой к более
+// определённой: Unknown < UserPause < InitialBreak < Step < Breakpoint <
+// Exception. Не переставлять без синхронного обновления NotifyPaused.
 enum class PauseReason
 {
     None,
     Unknown,
-    InitialBreak,   // системная точка останова при запуске
-    Breakpoint,
-    Step,
     UserPause,
+    InitialBreak,   // системная точка останова при запуске
+    Step,
+    Breakpoint,
     Exception,
 };
 

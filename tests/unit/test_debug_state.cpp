@@ -252,10 +252,11 @@ TEST_CASE("debug_state: ожидание начальной точки оста�
     CHECK(result.load());
 }
 
-// Ответ на вопрос ревью (дефект 3): одна физическая остановка — одно
-// поколение. Повторное уведомление о паузе без промежуточного возобновления
-// не должно увеличивать поколение, но должно уточнить причину, если раньше
-// она была неопределённой.
+// Ответ на вопрос ревью (дефект 3, позже переросший в дефект 2 живой
+// проверки): одна физическая остановка — одно поколение. Повторное
+// уведомление о паузе без промежуточного возобновления не должно увеличивать
+// поколение, но должно уточнять причину по приоритету (см. PauseReason в
+// debug_state.h), а не только заменять Unknown.
 TEST_CASE("debug_state: повторное уведомление о паузе без возобновления не увеличивает поколение") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
@@ -270,11 +271,43 @@ TEST_CASE("debug_state: повторное уведомление о паузе 
     CHECK(second.generation == first.generation);
     CHECK(second.reason == PauseReason::Breakpoint);
 
-    // Причина уже определена — следующее уведомление её не портит.
+    // Причина уже более приоритетна, чем Step — следующее уведомление её не портит.
     tracker.NotifyPaused(PauseReason::Step);
     const StateSnapshot third = tracker.Current();
     CHECK(third.generation == first.generation);
     CHECK(third.reason == PauseReason::Breakpoint);
+}
+
+// Дефект 2 живой проверки: x64dbg присылает несколько уведомлений на одну
+// физическую остановку в непредсказуемом порядке. Если менее определённая
+// причина (UserPause) приходит РАНЬШЕ более определённой (Step), она не
+// должна пережить последующее, более точное уведомление.
+TEST_CASE("debug_state: менее определённая причина уступает более определённой в пределах одной паузы") {
+    DebugStateTracker tracker;
+    tracker.NotifyDebugStarted();
+    const unsigned long long before = tracker.Current().generation;
+
+    tracker.NotifyPaused(PauseReason::UserPause);
+    tracker.NotifyPaused(PauseReason::Step);
+    const StateSnapshot snapshot = tracker.Current();
+
+    CHECK(snapshot.reason == PauseReason::Step);
+    CHECK(snapshot.generation == before + 1);
+}
+
+// Обратный порядок: более определённая причина (Breakpoint), пришедшая
+// первой, не должна быть вытеснена менее определённым UserPause.
+TEST_CASE("debug_state: более определённая причина не уступает менее определённой") {
+    DebugStateTracker tracker;
+    tracker.NotifyDebugStarted();
+    const unsigned long long before = tracker.Current().generation;
+
+    tracker.NotifyPaused(PauseReason::Breakpoint);
+    tracker.NotifyPaused(PauseReason::UserPause);
+    const StateSnapshot snapshot = tracker.Current();
+
+    CHECK(snapshot.reason == PauseReason::Breakpoint);
+    CHECK(snapshot.generation == before + 1);
 }
 
 // Ловит мутацию "предикат ожидания заменён на голое ожидание": при одной
