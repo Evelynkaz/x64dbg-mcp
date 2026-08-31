@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace x64dbg_mcp::plugin
@@ -163,5 +164,57 @@ struct ThreadEntry
 
 // Список всех потоков отлаживаемого процесса.
 bool ListThreads(std::vector<ThreadEntry>& out, std::string& error);
+
+// Значение одного регистра.
+struct RegisterValue { std::string name; unsigned long long value = 0; };
+
+// Снимок регистров текущего потока.
+struct RegisterDump
+{
+    std::vector<RegisterValue> general;   // общего назначения, включая указатель инструкций и стека
+    std::vector<RegisterValue> segment;   // сегментные
+    std::vector<RegisterValue> debugRegs; // отладочные
+    unsigned long long eflags = 0;
+    std::vector<std::pair<std::string, bool>> flags; // разобранные флаги
+    std::vector<std::pair<std::string, std::string>> simd; // имя и шестнадцатеричное значение, если запрошено
+    unsigned int lastError = 0;
+    unsigned int lastStatus = 0;
+};
+
+// Чтение регистров. includeSimd включает XMM-регистры в вывод. Требует
+// активной отладки и паузы: во время выполнения значения регистров не
+// зафиксированы и DbgGetRegDumpEx вернул бы произвольный/устаревший снимок,
+// как и cip в GetStatus.
+bool ReadRegisters(bool includeSimd, RegisterDump& out, std::string& error);
+
+// Один элемент стека вызовов.
+struct CallStackFrame
+{
+    unsigned long long address = 0; // адрес элемента стека, где лежит адрес возврата
+    unsigned long long from = 0;    // откуда был вызов
+    unsigned long long to = 0;      // куда был вызов
+    std::string comment;
+};
+
+// Стек вызовов потока threadId. threadId == 0 означает текущий поток.
+// Требует активной отладки и паузы.
+bool GetCallStack(unsigned int threadId, std::vector<CallStackFrame>& out, std::string& error);
+
+// Один машинный элемент стека (слот).
+struct StackSlot
+{
+    unsigned long long address = 0;
+    unsigned long long value = 0;
+    std::string comment;
+};
+
+// Пределы на количество слотов стека, читаемых за один вызов ReadStack.
+constexpr size_t kMinStackSlots = 1;
+constexpr size_t kMaxStackSlots = 256;
+constexpr size_t kDefaultStackSlots = 16;
+
+// Чтение count машинных слов стека начиная с текущего указателя стека.
+// Требует активной отладки и паузы.
+bool ReadStack(size_t count, std::vector<StackSlot>& out, std::string& error);
 
 } // namespace x64dbg_mcp::plugin

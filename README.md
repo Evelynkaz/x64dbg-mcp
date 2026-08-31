@@ -13,6 +13,7 @@ An MCP server for the [x64dbg](https://x64dbg.com/) debugger. It gives an AI age
 - Set, manage, and list breakpoints, software, hardware, and memory, with conditions and logging.
 - List loaded modules and report a module sections, exports, and imports.
 - Report the process memory map and enumerate its threads.
+- Read CPU registers with decoded flags, reconstruct the call stack, and inspect the contents of the stack.
 
 ## Example
 
@@ -126,6 +127,9 @@ The server can be started before x64dbg: the connection to the plugin is establi
 | `module_info` | Reports a module sections and, on request, its export and import tables. |
 | `memory_map` | Reports the process memory map: regions, state, type, and access protection. |
 | `list_threads` | Lists the debuggee threads with their state and which one is current. |
+| `read_registers` | Reads the CPU registers of the paused debuggee: general purpose, segment, debug, and the flags register with individual flags decoded. |
+| `call_stack` | Reconstructs the chain of calls that led to the current instruction, with return addresses and resolved symbols. |
+| `read_stack` | Reads machine words from the top of the stack together with the debugger's annotations for them. |
 
 ## Security and risks
 
@@ -170,7 +174,7 @@ The C runtime is linked statically, so there is nothing extra to redistribute al
 
 ## Limitations
 
-Not implemented yet: writing to or patching memory, running arbitrary x64dbg commands or scripts, execution tracing and code coverage, reading registers and the call stack, byte-pattern signature search, cross-references, and MCP resources. These are planned; see `docs/tools.md` for the full roadmap.
+Not implemented yet: writing to or patching memory, running arbitrary x64dbg commands or scripts, execution tracing and code coverage, byte-pattern signature search, cross-references, and MCP resources. These are planned; see `docs/tools.md` for the full roadmap.
 
 ## License
 

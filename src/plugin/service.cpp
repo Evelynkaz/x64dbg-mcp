@@ -709,6 +709,160 @@ std::string HandleThreadsList(DebuggerWorker& worker, const nlohmann::json& id)
     return BuildOkResponse(id, result);
 }
 
+struct ReadRegistersOutcome
+{
+    bool ok = false;
+    RegisterDump dump;
+    std::string error;
+};
+
+nlohmann::json RegisterValuesToJson(const std::vector<RegisterValue>& values)
+{
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& reg : values)
+    {
+        nlohmann::json item;
+        item["name"] = reg.name;
+        item["value"] = reg.value;
+        list.push_back(std::move(item));
+    }
+    return list;
+}
+
+std::string HandleRegistersRead(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string paramError;
+    bool includeSimd = false;
+    if (!GetOptionalBoolParam(params, "include_simd", false, includeSimd, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<ReadRegistersOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, includeSimd] { outcome->ok = ReadRegisters(includeSimd, outcome->dump, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    const RegisterDump& dump = outcome->dump;
+    nlohmann::json flags;
+    for (const auto& flag : dump.flags)
+        flags[flag.first] = flag.second;
+
+    nlohmann::json simd = nlohmann::json::array();
+    for (const auto& reg : dump.simd)
+    {
+        nlohmann::json item;
+        item["name"] = reg.first;
+        item["value"] = reg.second;
+        simd.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["general"] = RegisterValuesToJson(dump.general);
+    result["segment"] = RegisterValuesToJson(dump.segment);
+    result["debug"] = RegisterValuesToJson(dump.debugRegs);
+    result["eflags"] = dump.eflags;
+    result["flags"] = flags;
+    result["simd"] = simd;
+    result["lastError"] = dump.lastError;
+    result["lastStatus"] = dump.lastStatus;
+    return BuildOkResponse(id, result);
+}
+
+struct GetCallStackOutcome
+{
+    bool ok = false;
+    std::vector<CallStackFrame> frames;
+    std::string error;
+};
+
+std::string HandleCallStack(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string paramError;
+    int threadId = 0;
+    if (!GetOptionalIntParam(params, "thread_id", 0, threadId, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+    if (threadId < 0)
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, "Parameter \"thread_id\" must not be negative");
+
+    auto outcome = std::make_shared<GetCallStackOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, threadId]
+        { outcome->ok = GetCallStack(static_cast<unsigned int>(threadId), outcome->frames, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json frames = nlohmann::json::array();
+    for (const auto& frame : outcome->frames)
+    {
+        nlohmann::json item;
+        item["address"] = frame.address;
+        item["from"] = frame.from;
+        item["to"] = frame.to;
+        item["comment"] = frame.comment;
+        frames.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["frames"] = frames;
+    return BuildOkResponse(id, result);
+}
+
+struct ReadStackOutcome
+{
+    bool ok = false;
+    std::vector<StackSlot> slots;
+    std::string error;
+};
+
+std::string HandleStackRead(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string paramError;
+    int count = static_cast<int>(kDefaultStackSlots);
+    if (!GetOptionalIntParam(params, "count", static_cast<int>(kDefaultStackSlots), count, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+    if (count < 1)
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, "Parameter \"count\" must be greater than zero");
+
+    auto outcome = std::make_shared<ReadStackOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, count]
+        { outcome->ok = ReadStack(static_cast<size_t>(count), outcome->slots, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json slots = nlohmann::json::array();
+    for (const auto& slot : outcome->slots)
+    {
+        nlohmann::json item;
+        item["address"] = slot.address;
+        item["value"] = slot.value;
+        item["comment"] = slot.comment;
+        slots.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["slots"] = slots;
+    return BuildOkResponse(id, result);
+}
+
 // Коллбэки состояния отладки. Исполняются в потоках отладчика x64dbg, поэтому
 // обязаны быть максимально короткими и не бросать исключений: DebugStateTracker
 // сам по себе исключений не бросает.
@@ -828,6 +982,12 @@ std::string McpService::HandleRequest(const std::string& request)
         return HandleMemoryMap(worker_, id);
     if (method == "threads.list")
         return HandleThreadsList(worker_, id);
+    if (method == "registers.read")
+        return HandleRegistersRead(worker_, id, params);
+    if (method == "callstack")
+        return HandleCallStack(worker_, id, params);
+    if (method == "stack.read")
+        return HandleStackRead(worker_, id, params);
 
     return BuildErrorResponse(id, ipc::ErrorCode::UnknownMethod, "Unknown method: " + method);
 }

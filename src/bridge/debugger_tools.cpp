@@ -453,6 +453,186 @@ std::string FormatThreadList(const nlohmann::json& threads)
     return out.str();
 }
 
+// Печатает значение регистра в шестнадцатеричном виде независимо от того,
+// пришло ли оно числом (обычные регистры) или строкой (широкие регистры
+// SIMD, которые не помещаются в 64-битное целое JSON).
+std::string FormatRegisterValue(const nlohmann::json& value)
+{
+    if (value.is_number_integer())
+    {
+        std::ostringstream text;
+        text << "0x" << std::hex << value.get<std::uint64_t>();
+        return text.str();
+    }
+    if (value.is_string())
+    {
+        const std::string text = value.get<std::string>();
+        if (text.rfind("0x", 0) == 0 || text.rfind("0X", 0) == 0)
+            return text;
+        return "0x" + text;
+    }
+    return "0x0";
+}
+
+// Список регистров ({"name","value"}) в несколько колонок, чтобы группа
+// регистров помещалась на экран целиком, а не растягивалась на много строк.
+std::string FormatRegisterColumns(const nlohmann::json& registers, int columns)
+{
+    std::ostringstream out;
+    int inRow = 0;
+    for (const auto& reg : registers)
+    {
+        const std::string name = reg.value("name", std::string());
+        std::ostringstream cell;
+        cell << std::left << std::setw(4) << name << FormatRegisterValue(reg.value("value", nlohmann::json()));
+
+        out << std::left << std::setw(22) << cell.str();
+        ++inRow;
+        if (inRow == columns)
+        {
+            out << '\n';
+            inRow = 0;
+        }
+    }
+    if (inRow != 0)
+        out << '\n';
+    return out.str();
+}
+
+// Человекочитаемая сводка registers.read: регистры общего назначения в
+// колонках, EFLAGS с перечнем установленных флагов, сегментные регистры,
+// отладочные регистры (только если хотя бы один ненулевой), и, если
+// запрошены, регистры SIMD по одному на строку.
+std::string FormatRegisters(const nlohmann::json& result, bool includeSimd)
+{
+    std::ostringstream out;
+    out << "General purpose registers:\n"
+        << FormatRegisterColumns(result.value("general", nlohmann::json::array()), 3);
+
+    const std::uint64_t eflags = result.value("eflags", 0ULL);
+    const nlohmann::json flags = result.value("flags", nlohmann::json::object());
+    std::ostringstream setFlags;
+    bool firstFlag = true;
+    for (const char* flag : {"CF", "PF", "AF", "ZF", "SF", "TF", "IF", "DF", "OF"})
+    {
+        if (flags.value(flag, false))
+        {
+            if (!firstFlag)
+                setFlags << ' ';
+            setFlags << flag;
+            firstFlag = false;
+        }
+    }
+    out << "\nEFLAGS: 0x" << std::hex << eflags
+        << "  [" << (setFlags.str().empty() ? "none set" : setFlags.str()) << "]\n";
+
+    out << "\nSegment registers:\n"
+        << FormatRegisterColumns(result.value("segment", nlohmann::json::array()), 6);
+
+    const nlohmann::json debugRegisters = result.value("debug", nlohmann::json::array());
+    bool anyDebugRegisterSet = false;
+    for (const auto& reg : debugRegisters)
+    {
+        const nlohmann::json value = reg.value("value", nlohmann::json());
+        if ((value.is_number_integer() && value.get<std::uint64_t>() != 0) ||
+            (value.is_string() && !value.get<std::string>().empty() &&
+             value.get<std::string>().find_first_not_of('0') != std::string::npos))
+        {
+            anyDebugRegisterSet = true;
+            break;
+        }
+    }
+    if (anyDebugRegisterSet)
+    {
+        out << "\nDebug registers:\n"
+            << FormatRegisterColumns(debugRegisters, 4);
+    }
+
+    if (includeSimd)
+    {
+        const nlohmann::json simd = result.value("simd", nlohmann::json::array());
+        out << "\nSIMD registers:\n";
+        for (const auto& reg : simd)
+        {
+            const std::string name = reg.value("name", std::string());
+            out << std::left << std::setw(8) << name
+                << FormatRegisterValue(reg.value("value", nlohmann::json())) << '\n';
+        }
+    }
+
+    const unsigned long long lastError = result.value("lastError", 0ULL);
+    const unsigned long long lastStatus = result.value("lastStatus", 0ULL);
+    out << "\nLastError: 0x" << std::hex << lastError
+        << "  LastStatus: 0x" << std::hex << lastStatus << '\n';
+    return out.str();
+}
+
+// Таблица кадров стека вызовов: номер кадра, адрес возврата на стеке,
+// откуда сделан вызов, куда он вёл, и комментарий отладчика.
+std::string FormatCallStack(const nlohmann::json& frames)
+{
+    std::ostringstream out;
+    out << std::left
+        << std::setw(6) << "Frame"
+        << std::setw(18) << "Address"
+        << std::setw(18) << "From"
+        << std::setw(18) << "To"
+        << "Comment" << '\n';
+
+    std::size_t index = 0;
+    for (const auto& frame : frames)
+    {
+        const std::uint64_t address = frame.value("address", 0ULL);
+        const std::uint64_t from = frame.value("from", 0ULL);
+        const std::uint64_t to = frame.value("to", 0ULL);
+        const std::string comment = frame.value("comment", std::string());
+
+        std::ostringstream addressText, fromText, toText;
+        addressText << "0x" << std::hex << address;
+        fromText << "0x" << std::hex << from;
+        toText << "0x" << std::hex << to;
+
+        out << std::left
+            << std::setw(6) << index
+            << std::setw(18) << addressText.str()
+            << std::setw(18) << fromText.str()
+            << std::setw(18) << toText.str()
+            << comment << '\n';
+        ++index;
+    }
+    if (frames.empty())
+        out << "(empty call stack)\n";
+    return out.str();
+}
+
+// Таблица слов на вершине стека: адрес слота, значение, комментарий
+// отладчика к этому значению (например, если это адрес возврата).
+std::string FormatStackSlots(const nlohmann::json& slots)
+{
+    std::ostringstream out;
+    out << std::left
+        << std::setw(18) << "Address"
+        << std::setw(18) << "Value"
+        << "Comment" << '\n';
+
+    for (const auto& slot : slots)
+    {
+        const std::uint64_t address = slot.value("address", 0ULL);
+        const std::uint64_t value = slot.value("value", 0ULL);
+        const std::string comment = slot.value("comment", std::string());
+
+        std::ostringstream addressText, valueText;
+        addressText << "0x" << std::hex << address;
+        valueText << "0x" << std::hex << value;
+
+        out << std::left
+            << std::setw(18) << addressText.str()
+            << std::setw(18) << valueText.str()
+            << comment << '\n';
+    }
+    return out.str();
+}
+
 } // namespace
 
 void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> link)
@@ -1312,6 +1492,157 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(listThreads));
+
+    Tool readRegisters;
+    readRegisters.name = "read_registers";
+    readRegisters.description =
+        "Read the CPU registers of the paused debuggee: general-purpose "
+        "registers, the instruction and stack pointers, segment registers, "
+        "debug registers, the EFLAGS register with its individual flags "
+        "already decoded, and the last-error code. Call this tool after "
+        "every pause to understand the current state, to read a function's "
+        "arguments as delivered by the calling convention (in registers "
+        "for x64, or after locating the stack frame for x86), or to check "
+        "the outcome of a comparison right before a conditional jump. The "
+        "decoded flags matter for predicting where a conditional jump "
+        "goes: ZF is set when the result of the previous operation was "
+        "zero (drives JZ/JE and JNZ/JNE), CF is set on an unsigned carry "
+        "or borrow (drives JB/JC and JAE/JNC), SF mirrors the sign bit of "
+        "the result (drives JS/JNS), and OF is set on signed overflow "
+        "(drives JO/JNO and, together with SF, the signed comparisons "
+        "JL/JGE/JG/JLE). Requires an active debugging session with the "
+        "process paused; the registers reported belong to the current "
+        "thread. SIMD registers (XMM/YMM) are NOT included by default "
+        "because they take up a lot of space; set 'include_simd' to true "
+        "only when they are actually needed.";
+    readRegisters.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"include_simd", {
+                {"type", "boolean"},
+                {"default", false},
+                {"description", "Include SIMD (XMM/YMM) registers. Defaults to false; they take up a lot of space."}
+            }}
+        }},
+        {"additionalProperties", false}
+    };
+    readRegisters.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("read_registers: plugin link is not configured");
+
+        const bool includeSimd = arguments.value("include_simd", false);
+
+        ToolResult result;
+        result.structuredContent = link->Call("registers.read", {
+            {"include_simd", includeSimd}
+        });
+        result.text = FormatRegisters(result.structuredContent, includeSimd);
+        return result;
+    };
+    registry.Add(std::move(readRegisters));
+
+    Tool callStack;
+    callStack.name = "call_stack";
+    callStack.description =
+        "Reconstruct the chain of calls that led to the current point of "
+        "execution: for each frame, the address of the stack slot holding "
+        "the return address, where the call was made from, where it led "
+        "to, and the debugger's comment for that frame. Use it to "
+        "understand how the program reached the current location, to find "
+        "the caller of the current function, or to trace a path from a "
+        "known entry point down to the code of interest. Requires an "
+        "active debugging session with the process paused; by default the "
+        "call stack of the current thread is returned, use 'thread_id' "
+        "(from list_threads) to inspect another thread. In optimized code "
+        "built without frame pointers, unwinding can be incomplete or "
+        "inaccurate — treat the result as a best effort, not a guarantee.";
+    callStack.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"thread_id", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Identifier of the thread whose call stack to reconstruct, from "
+                 "list_threads. Omit, or pass 0, to use the current thread."}
+            }}
+        }},
+        {"additionalProperties", false}
+    };
+    callStack.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("call_stack: plugin link is not configured");
+
+        nlohmann::json params = nlohmann::json::object();
+        if (arguments.contains("thread_id"))
+        {
+            RequireNonNegativeInteger(arguments, "thread_id", "call_stack");
+            params["thread_id"] = arguments["thread_id"].get<long long>();
+        }
+
+        ToolResult result;
+        result.structuredContent = link->Call("callstack", params);
+        const nlohmann::json frames = result.structuredContent.value("frames", nlohmann::json::array());
+        result.text = FormatCallStack(frames);
+        return result;
+    };
+    registry.Add(std::move(callStack));
+
+    Tool readStack;
+    readStack.name = "read_stack";
+    readStack.description =
+        "Read the machine words sitting on top of the stack, starting at "
+        "the current stack pointer, together with the debugger's comment "
+        "for each one (for example, identifying a value as a return "
+        "address or a pointer into a module). Use it to inspect a "
+        "function's arguments and local variables, to look for return "
+        "addresses and pointers to data, or to make sense of a stack "
+        "frame. Requires an active debugging session with the process "
+        "paused. Reads from 1 to 256 words per call, 16 by default; the "
+        "size of a word matches the bitness of the debugged process (4 "
+        "bytes for a 32-bit process, 8 bytes for a 64-bit process).";
+    readStack.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"count", {
+                {"type", "integer"},
+                {"minimum", 1},
+                {"maximum", 256},
+                {"default", 16},
+                {"description", "Number of stack words to read, from 1 to 256. Defaults to 16."}
+            }}
+        }},
+        {"additionalProperties", false}
+    };
+    readStack.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("read_stack: plugin link is not configured");
+
+        long long count = 16;
+        if (arguments.contains("count"))
+        {
+            if (!arguments["count"].is_number_integer())
+                throw ToolError("read_stack: 'count' must be an integer between 1 and 256");
+            count = arguments["count"].get<long long>();
+            if (count < 1 || count > 256)
+                throw ToolError("read_stack: 'count' must be between 1 and 256");
+        }
+
+        ToolResult result;
+        result.structuredContent = link->Call("stack.read", {
+            {"count", count}
+        });
+        const nlohmann::json slots = result.structuredContent.value("slots", nlohmann::json::array());
+        result.text = FormatStackSlots(slots);
+        return result;
+    };
+    registry.Add(std::move(readStack));
 }
 
 } // namespace x64dbg_mcp::bridge

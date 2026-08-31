@@ -4,6 +4,7 @@
 #include "pluginsdk/_scriptapi_module.h"
 
 #include <chrono>
+#include <iomanip>
 #include <sstream>
 #include <thread>
 
@@ -86,6 +87,33 @@ bool RequireDebugging(std::string& error)
         return false;
     }
     return true;
+}
+
+// Регистры, стек вызовов и содержимое стека осмысленны только когда процесс
+// стоит на паузе: во время выполнения они меняются в произвольный момент, и
+// x64dbg вернул бы устаревший или произвольный снимок (см. аналогичное
+// ограничение для cip в GetStatus).
+bool RequirePaused(const char* what, std::string& error)
+{
+    if (!RequireDebugging(error))
+        return false;
+    if (DbgIsRunning())
+    {
+        error = std::string("The process is currently running: pause it before reading ") + what;
+        return false;
+    }
+    return true;
+}
+
+// Форматирует 128-битное значение XMM-регистра как шестнадцатеричную строку
+// из 32 символов, старшая часть первой.
+std::string FormatXmmHex(const XMMREGISTER& xmm)
+{
+    std::ostringstream out;
+    out << std::hex << std::setfill('0')
+        << std::setw(16) << static_cast<unsigned long long>(xmm.High)
+        << std::setw(16) << static_cast<unsigned long long>(xmm.Low);
+    return out.str();
 }
 
 // Читает необязательное строковое поле. Возвращает false, если поле есть,
@@ -1110,6 +1138,203 @@ bool ListThreads(std::vector<ThreadEntry>& out, std::string& error)
     {
         out.clear();
         error = "Internal error while listing threads";
+        return false;
+    }
+}
+
+bool ReadRegisters(bool includeSimd, RegisterDump& out, std::string& error)
+{
+    out = RegisterDump{};
+    try
+    {
+        if (!RequirePaused("registers", error))
+            return false;
+
+        REGDUMP_AVX512 dump = {};
+        if (!DbgGetRegDumpEx(&dump, sizeof(dump)))
+        {
+            error = "Failed to read the register dump";
+            return false;
+        }
+
+        const auto& ctx = dump.regcontext;
+#ifdef _WIN64
+        out.general = {
+            {"rax", ctx.cax}, {"rbx", ctx.cbx}, {"rcx", ctx.ccx}, {"rdx", ctx.cdx},
+            {"rsi", ctx.csi}, {"rdi", ctx.cdi}, {"rbp", ctx.cbp}, {"rsp", ctx.csp},
+            {"r8", ctx.r8}, {"r9", ctx.r9}, {"r10", ctx.r10}, {"r11", ctx.r11},
+            {"r12", ctx.r12}, {"r13", ctx.r13}, {"r14", ctx.r14}, {"r15", ctx.r15},
+            {"rip", ctx.cip}
+        };
+#else
+        out.general = {
+            {"eax", ctx.cax}, {"ebx", ctx.cbx}, {"ecx", ctx.ccx}, {"edx", ctx.cdx},
+            {"esi", ctx.csi}, {"edi", ctx.cdi}, {"ebp", ctx.cbp}, {"esp", ctx.csp},
+            {"eip", ctx.cip}
+        };
+#endif
+        out.segment = {
+            {"gs", ctx.gs}, {"fs", ctx.fs}, {"es", ctx.es}, {"ds", ctx.ds}, {"cs", ctx.cs}, {"ss", ctx.ss}
+        };
+        out.debugRegs = {
+            {"dr0", ctx.dr0}, {"dr1", ctx.dr1}, {"dr2", ctx.dr2}, {"dr3", ctx.dr3}, {"dr6", ctx.dr6}, {"dr7", ctx.dr7}
+        };
+
+        out.eflags = static_cast<unsigned long long>(ctx.eflags);
+        // Стандартная раскладка регистра флагов x86: CF(0), PF(2), AF(4),
+        // ZF(6), SF(7), TF(8), IF(9), DF(10), OF(11).
+        auto bit = [&](int n) { return (out.eflags & (1ull << n)) != 0; };
+        out.flags = {
+            {"CF", bit(0)}, {"PF", bit(2)}, {"AF", bit(4)}, {"ZF", bit(6)}, {"SF", bit(7)},
+            {"TF", bit(8)}, {"IF", bit(9)}, {"DF", bit(10)}, {"OF", bit(11)}
+        };
+
+        // SIMD-регистры включаются только по запросу: шестнадцать 128-битных
+        // значений заметно раздувают ответ, а нужны они редко.
+        if (includeSimd)
+        {
+#ifdef _WIN64
+            constexpr int kXmmCount = 16;
+#else
+            constexpr int kXmmCount = 8;
+#endif
+            for (int i = 0; i < kXmmCount; ++i)
+            {
+                // Младшие 128 бит ZMM-регистра — это и есть классический XMM.
+                const XMMREGISTER& xmm = ctx.ZmmRegisters[i].Low.Low;
+                out.simd.emplace_back("xmm" + std::to_string(i), FormatXmmHex(xmm));
+            }
+        }
+
+        out.lastError = static_cast<unsigned int>(dump.lastError);
+        out.lastStatus = static_cast<unsigned int>(dump.lastStatus);
+        return true;
+    }
+    catch (...)
+    {
+        out = RegisterDump{};
+        error = "Internal error while reading registers";
+        return false;
+    }
+}
+
+bool GetCallStack(unsigned int threadId, std::vector<CallStackFrame>& out, std::string& error)
+{
+    out.clear();
+    try
+    {
+        if (!RequirePaused("the call stack", error))
+            return false;
+
+        DBGCALLSTACK callstack = {};
+        if (threadId == 0)
+        {
+            DbgFunctions()->GetCallStackEx(&callstack, false);
+        }
+        else
+        {
+            THREADLIST threadList = {};
+            DbgGetThreadList(&threadList);
+
+            // См. аналогичное освобождение через BridgeFree в ListThreads.
+            struct ListGuard
+            {
+                THREADLIST* list;
+                ~ListGuard() { if (list->list) BridgeFree(list->list); }
+            } listGuard{&threadList};
+
+            HANDLE handle = nullptr;
+            for (int i = 0; i < threadList.count; ++i)
+            {
+                if (static_cast<unsigned int>(threadList.list[i].BasicInfo.ThreadId) == threadId)
+                {
+                    handle = threadList.list[i].BasicInfo.Handle;
+                    break;
+                }
+            }
+            if (!handle)
+            {
+                error = "No thread with id " + std::to_string(threadId) + " was found";
+                return false;
+            }
+
+            DbgFunctions()->GetCallStackByThread(handle, &callstack);
+        }
+
+        // GetCallStackEx/GetCallStackByThread выделяют callstack.entries через
+        // BridgeAlloc; эталонный потребитель — external/x64dbg/src/gui/Src/Gui/CallStackView.cpp —
+        // освобождает результат через BridgeFree, поэтому делаем так же.
+        struct CallStackGuard
+        {
+            DBGCALLSTACK* stack;
+            ~CallStackGuard() { if (stack->entries) BridgeFree(stack->entries); }
+        } csGuard{&callstack};
+
+        out.reserve(static_cast<size_t>(callstack.total));
+        for (int i = 0; i < callstack.total; ++i)
+        {
+            const DBGCALLSTACKENTRY& entry = callstack.entries[i];
+            CallStackFrame frame;
+            frame.address = static_cast<unsigned long long>(entry.addr);
+            frame.from = static_cast<unsigned long long>(entry.from);
+            frame.to = static_cast<unsigned long long>(entry.to);
+            frame.comment = entry.comment;
+            out.push_back(std::move(frame));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        error = "Internal error while reading the call stack";
+        return false;
+    }
+}
+
+bool ReadStack(size_t count, std::vector<StackSlot>& out, std::string& error)
+{
+    out.clear();
+    try
+    {
+        if (!RequirePaused("the stack", error))
+            return false;
+        if (count < kMinStackSlots || count > kMaxStackSlots)
+        {
+            error = "Parameter \"count\" must be between 1 and 256";
+            return false;
+        }
+
+        bool success = false;
+        const duint sp = DbgEval("csp", &success);
+        if (!success)
+        {
+            error = "Failed to determine the current stack pointer";
+            return false;
+        }
+
+        out.reserve(count);
+        for (size_t i = 0; i < count; ++i)
+        {
+            const duint addr = sp + static_cast<duint>(i * sizeof(duint));
+            StackSlot slot;
+            slot.address = static_cast<unsigned long long>(addr);
+
+            duint value = 0;
+            if (DbgMemRead(addr, &value, sizeof(value)))
+                slot.value = static_cast<unsigned long long>(value);
+
+            STACK_COMMENT comment = {};
+            if (DbgStackCommentGet(addr, &comment))
+                slot.comment = comment.comment;
+
+            out.push_back(std::move(slot));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        error = "Internal error while reading the stack";
         return false;
     }
 }
