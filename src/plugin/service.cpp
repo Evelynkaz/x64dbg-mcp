@@ -2099,6 +2099,196 @@ std::string HandleProcessSehChain(DebuggerWorker& worker, const nlohmann::json& 
     return BuildOkResponse(id, result);
 }
 
+struct ListProcessesOutcome
+{
+    bool ok = false;
+    std::vector<ProcessEntry> processes;
+    bool truncated = false;
+    std::string error;
+};
+
+std::string HandleProcessList(DebuggerWorker& worker, const nlohmann::json& id)
+{
+    auto outcome = std::make_shared<ListProcessesOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome] { outcome->ok = ListProcesses(outcome->processes, outcome->truncated, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& proc : outcome->processes)
+    {
+        nlohmann::json item;
+        item["pid"] = proc.pid;
+        item["exeFile"] = proc.exeFile;
+        item["mainWindowTitle"] = proc.mainWindowTitle;
+        item["commandLine"] = proc.commandLine;
+        list.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["processes"] = list;
+    result["truncated"] = outcome->truncated;
+    return BuildOkResponse(id, result);
+}
+
+struct AllocateMemoryOutcome
+{
+    bool ok = false;
+    unsigned long long address = 0;
+    std::string error;
+};
+
+std::string HandleMemoryAllocate(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long size = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "size", size, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    // address == 0 (the default) means "let the system choose the address",
+    // matching AllocateMemory's own convention for preferredAddress.
+    unsigned long long preferredAddress = 0;
+    if (params.is_object() && params.contains("address") &&
+        !GetUint64Param(params, "address", preferredAddress, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<AllocateMemoryOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, size, preferredAddress]
+        { outcome->ok = AllocateMemory(size, preferredAddress, outcome->address, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["address"] = outcome->address;
+    result["size"] = size;
+    return BuildOkResponse(id, result);
+}
+
+std::string HandleMemoryFree(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<WriteOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address] { outcome->ok = FreeMemory(address, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["ok"] = true;
+    return BuildOkResponse(id, result);
+}
+
+std::string HandleMemoryDump(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0, size = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError) ||
+        !GetUint64Param(params, "size", size, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    std::string path;
+    if (!GetRequiredStringParam(params, "path", path, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<WriteOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address, size, path] { outcome->ok = DumpMemory(address, size, path, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["path"] = path;
+    result["size"] = size;
+    return BuildOkResponse(id, result);
+}
+
+std::string HandleDebugAttach(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long pidParam = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "pid", pidParam, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    int timeoutMs = 0;
+    if (!GetOptionalIntParam(params, "timeoutMs", 0, timeoutMs, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+    if (timeoutMs < 0)
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, "Parameter \"timeoutMs\" must not be negative");
+
+    // Attach needs a longer default wait than a plain run/step: reaching the
+    // system breakpoint after attaching can take noticeably longer (see
+    // kDefaultAttachTimeoutMs in debugger.h). timeoutMs == 0 here means "use
+    // that default", the same convention as debug.control/debug.step use
+    // 0 for kDefaultControlTimeoutMs.
+    const int effectiveTimeoutMs = timeoutMs > 0 ? timeoutMs : kDefaultAttachTimeoutMs;
+    const int clampedTimeoutMs = effectiveTimeoutMs > kMaxControlTimeoutMs ? kMaxControlTimeoutMs : effectiveTimeoutMs;
+    const int submitTimeoutMs = clampedTimeoutMs + kWaitSubmitSlackMs;
+
+    const unsigned int pid = static_cast<unsigned int>(pidParam);
+    auto outcome = std::make_shared<ControlOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, pid, timeoutMs]
+        { outcome->ok = AttachProcess(pid, static_cast<unsigned int>(timeoutMs), outcome->result, outcome->error); },
+        submitTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    return BuildOkResponse(id, ControlResultToJson(outcome->result));
+}
+
+std::string HandleDebugDetach(DebuggerWorker& worker, const nlohmann::json& id)
+{
+    auto outcome = std::make_shared<WriteOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome] { outcome->ok = DetachProcess(outcome->error); }, kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["ok"] = true;
+    return BuildOkResponse(id, result);
+}
+
 // Debug state callbacks. Run on x64dbg's own debugger threads, so they must
 // be as short as possible and never throw: DebugStateTracker itself never throws.
 void CbInitDebug(CBTYPE, void*) { McpService::Instance().Tracker().NotifyDebugStarted(); }
@@ -2318,6 +2508,18 @@ std::string McpService::HandleRequest(const std::string& request)
         return HandleProcessConnections(worker_, id);
     if (method == "process.seh_chain")
         return HandleProcessSehChain(worker_, id);
+    if (method == "process.list")
+        return HandleProcessList(worker_, id);
+    if (method == "memory.allocate")
+        return HandleMemoryAllocate(worker_, id, params);
+    if (method == "memory.free")
+        return HandleMemoryFree(worker_, id, params);
+    if (method == "memory.dump")
+        return HandleMemoryDump(worker_, id, params);
+    if (method == "debug.attach")
+        return HandleDebugAttach(worker_, id, params);
+    if (method == "debug.detach")
+        return HandleDebugDetach(worker_, id);
 
     return BuildErrorResponse(id, ipc::ErrorCode::UnknownMethod, "Unknown method: " + method);
 }

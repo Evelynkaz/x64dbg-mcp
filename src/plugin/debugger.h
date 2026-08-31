@@ -541,4 +541,62 @@ struct SehEntry { unsigned long long address = 0, handler = 0; };
 // has installed; that emptiness is NOT evidence about the debuggee.
 bool GetSehChain(std::vector<SehEntry>& out, std::string& error);
 
+// A running process visible to the debugger, as returned by ListProcesses.
+struct ProcessEntry
+{
+    unsigned int pid = 0;
+    std::string exeFile;
+    std::string mainWindowTitle;
+    std::string commandLine;
+};
+
+// Upper limit on the number of entries returned by a single ListProcesses call.
+constexpr size_t kMaxProcessListEntries = 4096;
+
+// Lists processes currently visible to the debugger. Does NOT require an
+// active debugging session: its whole purpose is finding something to attach
+// to. An empty list is a normal result, not an error. Capped at
+// kMaxProcessListEntries; truncated is set when the cap is reached.
+bool ListProcesses(std::vector<ProcessEntry>& out, bool& truncated, std::string& error);
+
+// Upper limit on the size of a single AllocateMemory or DumpMemory request.
+constexpr unsigned long long kMaxAllocationSize = 256ull * 1024ull * 1024ull; // 256 MiB
+constexpr unsigned long long kMaxDumpSize = 256ull * 1024ull * 1024ull;      // 256 MiB
+
+// Allocates size bytes of PAGE_EXECUTE_READWRITE memory in the debuggee.
+// preferredAddress == 0 lets the system choose the address. Requires active
+// debugging.
+bool AllocateMemory(unsigned long long size, unsigned long long preferredAddress,
+                    unsigned long long& outAddress, std::string& error);
+
+// Frees memory previously allocated with AllocateMemory. address must be the
+// base address of that allocation — the underlying VirtualFreeEx only
+// accepts a region's base address. Requires active debugging.
+bool FreeMemory(unsigned long long address, std::string& error);
+
+// Saves size bytes of the debuggee's memory starting at address to a file at
+// path. Requires active debugging.
+bool DumpMemory(unsigned long long address, unsigned long long size,
+                const std::string& path, std::string& error);
+
+// Default timeout for waiting for the paused state after AttachProcess,
+// longer than kDefaultControlTimeoutMs: reaching the system breakpoint after
+// attaching can take noticeably longer than a plain run/step.
+constexpr int kDefaultAttachTimeoutMs = 30000;
+
+// Attaches to a running process by pid and waits for the resulting pause (the
+// system breakpoint, per the "attach" command). Fails if a debugging session
+// is already active — it must be ended first, e.g. via Control("stop") or
+// DetachProcess. timeoutMs == 0 means kDefaultAttachTimeoutMs. out is filled
+// the same way Control's wait path fills it: paused/timedOut/pauseReason
+// reflect what the tracker actually observed, and status is the state after
+// the operation — a timeout is reported as out.paused == false,
+// out.timedOut == true with error left empty, NOT as a failure, since the
+// attach itself was issued successfully.
+bool AttachProcess(unsigned int pid, unsigned int timeoutMs, ControlResult& out, std::string& error);
+
+// Detaches from the debuggee, leaving it running — unlike Control("stop"),
+// which terminates it. Requires active debugging.
+bool DetachProcess(std::string& error);
+
 } // namespace x64dbg_mcp::plugin

@@ -1,6 +1,7 @@
 #include "plugin/debugger.h"
 #include "plugin/plugin.h"
 #include "plugin/service.h"
+#include "pluginsdk/_scriptapi_memory.h"
 #include "pluginsdk/_scriptapi_module.h"
 #include "pluginsdk/_scriptapi_pattern.h"
 
@@ -32,6 +33,20 @@ int ClampTimeout(int timeoutMs)
         return kMaxControlTimeoutMs;
     return timeoutMs;
 }
+
+// Grace period AttachProcess waits for a debugging session to appear after
+// issuing "attach", before committing to the full pause-wait timeout.
+// DbgCmdExec only reports that the command was queued onto x64dbg's own
+// command thread, not that attach itself succeeded (see the comment in
+// ExecuteCommand) — but cbDebugAttach (external/x64dbg/src/dbg/commands/cmd-debug-control.cpp)
+// validates the pid, checks the target isn't already being debugged, and
+// checks the architecture matches, ALL synchronously and BEFORE it creates
+// the debug loop thread that sets DbgIsDebugging() true; on any of those
+// failures it returns without ever starting a session. So if no session
+// appears within this short window, the attach almost certainly failed, and
+// there is no point waiting out the rest of the (much longer) pause timeout
+// for a pause that can never come.
+constexpr int kAttachSessionGraceMs = 3000;
 
 // IMPORTANT: in x64dbg commands, arguments are separated by a COMMA, not a
 // space — a space only separates the command name from the first argument
@@ -923,14 +938,21 @@ bool Step(const std::string& mode, int count, bool wait, int timeoutMs,
         if (mode == "into")
         {
             const auto before = tracker.Current().generation;
-            DbgCmdExec(("StepInto " + std::to_string(count)).c_str());
+            // StepInto's count argument is parsed via valfromstring as an
+            // expression (see cbDebugStepInto in
+            // external/x64dbg/src/dbg/commands/cmd-debug-control.cpp), which
+            // is hex by default — a bare decimal count would silently step a
+            // different number of times for any count >= 10.
+            DbgCmdExec(("StepInto " + FormatHexAddress(static_cast<unsigned long long>(count))).c_str());
             return FinishWithWait(tracker, before, wait, clampedTimeout, out);
         }
 
         if (mode == "out")
         {
             const auto before = tracker.Current().generation;
-            DbgCmdExec(("StepOut " + std::to_string(count)).c_str());
+            // See the comment on the "into" case above — StepOut's count
+            // argument is parsed the same way.
+            DbgCmdExec(("StepOut " + FormatHexAddress(static_cast<unsigned long long>(count))).c_str());
             return FinishWithWait(tracker, before, wait, clampedTimeout, out);
         }
 
@@ -2594,7 +2616,12 @@ bool TraceUntil(const std::string& mode, const std::string& condition, int maxSt
         auto& tracker = McpService::Instance().Tracker();
 
         const std::string cmdName = (mode == "into") ? "TraceIntoConditional" : "TraceOverConditional";
-        const std::string cmd = cmdName + " " + condition + ", " + std::to_string(maxSteps);
+        // The maxSteps argument is parsed via valfromstring as an expression
+        // (see genericConditionalTraceCommand in
+        // external/x64dbg/src/dbg/commands/cmd-tracing.cpp), which is hex by
+        // default — a bare decimal count would silently trace a different
+        // number of steps than requested.
+        const std::string cmd = cmdName + " " + condition + ", " + FormatHexAddress(static_cast<unsigned long long>(maxSteps));
 
         const auto before = tracker.Current().generation;
         DbgCmdExec(cmd.c_str());
@@ -3050,6 +3077,301 @@ bool GetSehChain(std::vector<SehEntry>& out, std::string& error)
     {
         out.clear();
         error = "Internal error while reading the SEH chain";
+        return false;
+    }
+}
+
+bool ListProcesses(std::vector<ProcessEntry>& out, bool& truncated, std::string& error)
+{
+    out.clear();
+    truncated = false;
+    try
+    {
+        // Deliberately no RequireDebugging check: finding a process to attach
+        // to is the whole point of this call, and there is no debugging
+        // session yet at that point.
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->GetProcessList)
+        {
+            error = "Process listing is not supported by this x64dbg build";
+            return false;
+        }
+
+        DBGPROCESSINFO* entries = nullptr;
+        // -1 is a sentinel meaning "not written": GetProcessList
+        // (external/dbg/_dbgfunctions.cpp) returns false in two DIFFERENT
+        // situations that are otherwise indistinguishable from the return
+        // value alone — a genuine enumeration failure, where count is never
+        // touched, and a genuinely empty snapshot, where count IS written
+        // and is 0. Seeding count with a value GetProcessList never writes
+        // is what tells the two apart below.
+        int count = -1;
+        const bool ok = functions->GetProcessList(&entries, &count);
+
+        // GetProcessList allocates entries via BridgeAlloc (see
+        // external/x64dbg/src/dbg/_dbgfunctions.cpp); the reference consumer,
+        // external/x64dbg/src/gui/Src/Gui/AttachDialog.cpp, frees the result
+        // through BridgeFree, so we do the same, on every path.
+        struct EntriesGuard
+        {
+            DBGPROCESSINFO* ptr;
+            ~EntriesGuard() { if (ptr) BridgeFree(ptr); }
+        } guard{entries};
+
+        if (!ok)
+        {
+            if (count == 0)
+            {
+                // Empty snapshot: count was written, and is 0 — there is
+                // simply nothing to attach to right now, not an error.
+                return true;
+            }
+            // count is still the sentinel: GetProcessList failed before it
+            // ever got to write count, i.e. the enumeration itself failed.
+            // A machine always has running processes, so reporting this as
+            // an empty list would tell the model something impossible.
+            error = "Failed to retrieve the process list";
+            return false;
+        }
+
+        const int limit = count > static_cast<int>(kMaxProcessListEntries) ? static_cast<int>(kMaxProcessListEntries) : count;
+        truncated = count > static_cast<int>(kMaxProcessListEntries);
+        out.reserve(static_cast<size_t>(limit));
+        for (int i = 0; i < limit; ++i)
+        {
+            const DBGPROCESSINFO& info = entries[i];
+            ProcessEntry entry;
+            entry.pid = static_cast<unsigned int>(info.dwProcessId);
+            // szExeFile/szExeMainWindowTitle/szExeArgs are fixed char arrays
+            // filled by the debugger with a bounded strncpy_s, with no
+            // guarantee of a trailing null terminator when the source fills
+            // the buffer exactly (same class of bug as ListWindows below).
+            // Bound the length explicitly instead of assuming termination.
+            entry.exeFile.assign(info.szExeFile, ::strnlen(info.szExeFile, sizeof(info.szExeFile)));
+            entry.mainWindowTitle.assign(info.szExeMainWindowTitle,
+                ::strnlen(info.szExeMainWindowTitle, sizeof(info.szExeMainWindowTitle)));
+            entry.commandLine.assign(info.szExeArgs, ::strnlen(info.szExeArgs, sizeof(info.szExeArgs)));
+            out.push_back(std::move(entry));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        truncated = false;
+        error = "Internal error while listing processes";
+        return false;
+    }
+}
+
+bool AllocateMemory(unsigned long long size, unsigned long long preferredAddress,
+                    unsigned long long& outAddress, std::string& error)
+{
+    outAddress = 0;
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+        if (size == 0)
+        {
+            error = "Parameter \"size\" must be greater than zero";
+            return false;
+        }
+        if (size > kMaxAllocationSize)
+        {
+            error = "Requested allocation size exceeds the maximum of 256 MiB";
+            return false;
+        }
+
+        // RemoteAlloc takes the preferred address FIRST, size SECOND;
+        // preferredAddress == 0 lets the system choose the address.
+        const duint address = Script::Memory::RemoteAlloc(static_cast<duint>(preferredAddress), static_cast<duint>(size));
+        if (address == 0)
+        {
+            error = "Allocation failed: the debuggee may be out of address space, "
+                    "or the preferred address may be unavailable";
+            return false;
+        }
+
+        outAddress = static_cast<unsigned long long>(address);
+        return true;
+    }
+    catch (...)
+    {
+        outAddress = 0;
+        error = "Internal error while allocating memory";
+        return false;
+    }
+}
+
+bool FreeMemory(unsigned long long address, std::string& error)
+{
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+        if (address == 0)
+        {
+            error = "Parameter \"address\" must not be zero";
+            return false;
+        }
+
+        if (!Script::Memory::RemoteFree(static_cast<duint>(address)))
+        {
+            error = "Failed to free memory at the given address: it must be the base address of a region "
+                    "previously allocated in this process, since VirtualFreeEx only accepts a region's base address";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while freeing memory";
+        return false;
+    }
+}
+
+bool DumpMemory(unsigned long long address, unsigned long long size,
+                const std::string& path, std::string& error)
+{
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+        if (size == 0)
+        {
+            error = "Parameter \"size\" must be greater than zero";
+            return false;
+        }
+        if (size > kMaxDumpSize)
+        {
+            error = "Requested dump size exceeds the maximum of 256 MiB";
+            return false;
+        }
+        if (path.empty())
+        {
+            error = "Parameter \"path\" must not be empty";
+            return false;
+        }
+
+        // The path is quoted: unquoted, a path containing a space or a comma
+        // would be parsed as extra command arguments (arguments are
+        // comma-separated, see the comment at the top of this file) and
+        // either fail or write to the wrong place.
+        const std::string cmd = "savedata \"" + path + "\", " + FormatHexAddress(address) + ", " + FormatHexAddress(size);
+        if (!DbgCmdExecDirect(cmd.c_str()))
+        {
+            error = "The debugger rejected the memory dump command";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while dumping memory";
+        return false;
+    }
+}
+
+bool AttachProcess(unsigned int pid, unsigned int timeoutMs, ControlResult& out, std::string& error)
+{
+    out = ControlResult{};
+    try
+    {
+        if (DbgIsDebugging())
+        {
+            error = "A debugging session is already active: end it first — \"detach\" leaves the currently "
+                    "attached process running, while stopping terminates it";
+            return false;
+        }
+        if (pid == 0)
+        {
+            error = "Parameter \"pid\" must not be zero";
+            return false;
+        }
+
+        int clampedTimeout = timeoutMs == 0 ? kDefaultAttachTimeoutMs : static_cast<int>(timeoutMs);
+        if (clampedTimeout > kMaxControlTimeoutMs)
+            clampedTimeout = kMaxControlTimeoutMs;
+
+        auto& tracker = McpService::Instance().Tracker();
+        // Captured BEFORE the command is issued, same as every other
+        // wait-for-pause call in this file: this is what makes a pause that
+        // arrives before WaitForPauseAfter starts waiting still be observed,
+        // instead of lost to the race.
+        const auto before = tracker.Current().generation;
+        const auto overallDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(clampedTimeout);
+
+        // x64dbg's own docs warn, in bold: "All numbers in expressions are
+        // interpreted as hex by default!" (external/x64dbg/docs/introduction/Expressions.md).
+        // A bare decimal pid here would be silently reinterpreted as hex —
+        // format it explicitly so it can never be misread as decimal.
+        const std::string cmd = "attach " + FormatHexAddress(pid);
+        if (!DbgCmdExec(cmd.c_str()))
+        {
+            error = "The debugger rejected the attach command for pid " + std::to_string(pid);
+            return false;
+        }
+
+        // DbgCmdExec only reports that the command was accepted into the
+        // queue, not that attach succeeded — wait a short grace period for a
+        // debugging session to actually come into existence before treating
+        // the rest of the wait as meaningful. See the comment on
+        // kAttachSessionGraceMs for why this is a reliable signal.
+        const int graceMs = clampedTimeout < kAttachSessionGraceMs ? clampedTimeout : kAttachSessionGraceMs;
+        const auto graceDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(graceMs);
+        while (!DbgIsDebugging())
+        {
+            if (std::chrono::steady_clock::now() >= graceDeadline)
+            {
+                error = "The attach command for pid " + std::to_string(pid) + " did not start a debugging "
+                        "session: the process may not exist, may already be debugged, may be a different "
+                        "architecture than this debugger build, may require higher privileges, or another "
+                        "x64dbg plugin may be showing a modal dialog that blocks the attach until it is "
+                        "dismissed in the x64dbg window";
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        // Fills out exactly like Control's wait path: a real pauseReason
+        // from the tracker, real status after the operation, and a timeout
+        // reported as a success carrying paused=false/timedOut=true rather
+        // than an error — the attach itself was issued fine.
+        const auto now = std::chrono::steady_clock::now();
+        const int remainingMs = now >= overallDeadline ? 0 : static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(overallDeadline - now).count());
+        return FinishWithWait(tracker, before, true, remainingMs, out);
+    }
+    catch (...)
+    {
+        error = "Internal error while attaching to the process";
+        return false;
+    }
+}
+
+bool DetachProcess(std::string& error)
+{
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        // Sent asynchronously via DbgCmdExec, the same way Control() sends
+        // "stop" (StopDebug): detach also ends the debugging session, and
+        // running it directly on the worker thread could deadlock with or
+        // race the debug loop, per the comment on ExecuteCommand. Unlike
+        // stopping, which terminates the debuggee, detaching leaves it running.
+        if (!DbgCmdExec("detach"))
+        {
+            error = "Failed to send the detach command";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while detaching from the process";
         return false;
     }
 }

@@ -1246,6 +1246,77 @@ std::string FormatSehChain(const nlohmann::json& entries)
     return out.str();
 }
 
+// Aligned table of running processes: PID, executable file name, window
+// title, command line. Title and command line are truncated for the table
+// only, using TruncateForTable so a multi-byte character is never split;
+// the structured result keeps both strings in full. Followed by a count
+// line and, if the plugin reported truncation, a line about it.
+std::string FormatProcessList(const nlohmann::json& processes, bool truncated)
+{
+    std::ostringstream out;
+    out << std::left
+        << std::setw(8) << "PID"
+        << std::setw(24) << "Executable"
+        << std::setw(30) << "Title"
+        << "Command line" << '\n';
+
+    for (const auto& process : processes)
+    {
+        const unsigned int pid = process.value("pid", 0u);
+        const std::string exeFile = process.value("exeFile", std::string());
+        const std::string title = process.value("mainWindowTitle", std::string());
+        const std::string commandLine = process.value("commandLine", std::string());
+
+        out << std::left
+            << std::setw(8) << pid
+            << std::setw(24) << exeFile
+            << std::setw(30) << TruncateForTable(title, 28)
+            << TruncateForTable(commandLine, 80) << '\n';
+    }
+    out << processes.size() << " process" << (processes.size() == 1 ? "" : "es") << ".\n";
+    if (truncated)
+        out << "Process list truncated at the tool's limit.\n";
+    return out.str();
+}
+
+// Human-readable confirmation of debug.detach: the debuggee is left running.
+std::string FormatDetachResult()
+{
+    return "Detached from the debuggee. Its breakpoints were removed; the process keeps running.";
+}
+
+// Human-readable summary of memory.allocate: the resulting address and size in hex.
+std::string FormatAllocateMemoryResult(const nlohmann::json& result)
+{
+    const std::uint64_t address = result.value("address", 0ULL);
+    const std::uint64_t size = result.value("size", 0ULL);
+
+    std::ostringstream out;
+    out << "Allocated 0x" << std::hex << size << " bytes at 0x" << address << ".";
+    return out.str();
+}
+
+// Human-readable confirmation of memory.free: the address that was freed.
+std::string FormatFreeMemoryResult(std::uint64_t address)
+{
+    std::ostringstream out;
+    out << "Freed memory at 0x" << std::hex << address << ".";
+    return out.str();
+}
+
+// Human-readable summary of memory.dump: the address range, its size, and
+// the file it was written to.
+std::string FormatDumpMemoryResult(const nlohmann::json& result, std::uint64_t address)
+{
+    const std::uint64_t size = result.value("size", 0ULL);
+    const std::string path = result.value("path", std::string());
+
+    std::ostringstream out;
+    out << "Dumped 0x" << std::hex << size << " bytes (0x" << address << " - 0x" << (address + size)
+        << ") to " << path << ".";
+    return out.str();
+}
+
 } // namespace
 
 void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> link)
@@ -1415,12 +1486,15 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         "it, stop the debugging session, restart the target from scratch, "
         "or run until a chosen address. 'run' resumes a paused process. "
         "'pause' suspends a running process. 'stop' ends the debugging "
-        "session entirely. 'restart' terminates the current instance of "
-        "the debuggee and launches the same executable again from its "
-        "entry point. 'run_to' sets a temporary one-shot breakpoint at "
-        "'address' and resumes execution until that breakpoint is hit (or "
-        "the process stops for any other reason); use it to skip over "
-        "known, uninteresting code instead of single-stepping through it. "
+        "session entirely, TERMINATING the process — including one this "
+        "tool only attached to and did not start; if the process should "
+        "keep running instead, use detach_process. 'restart' terminates "
+        "the current instance of the debuggee and launches the same "
+        "executable again from its entry point. 'run_to' sets a "
+        "temporary one-shot breakpoint at 'address' and resumes execution "
+        "until that breakpoint is hit (or the process stops for any "
+        "other reason); use it to skip over known, uninteresting code "
+        "instead of single-stepping through it. "
         "By default this tool WAITS for the process to reach a paused "
         "state and returns the state after the operation completes, so "
         "there is no need to call wait_until_paused separately after "
@@ -3837,6 +3911,315 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(sehChain));
+
+    Tool listProcesses;
+    listProcesses.name = "list_processes";
+    listProcesses.description =
+        "List the processes currently running on the system, each with its "
+        "process identifier (PID), executable file name, main window "
+        "title, and full command line. Its purpose is finding a target "
+        "process to attach to: use it before attach_process to look up "
+        "the PID of the process to attach to. Unlike most tools in this "
+        "server, it does NOT require an active debugging session — it "
+        "reports on every process on the system, not just the one being "
+        "debugged. A console application or background service "
+        "legitimately has no main window; an empty title is normal, not "
+        "an error. The list is capped at the plugin's limit; when the cap "
+        "is hit, 'truncated' is true and the human-readable text says so. "
+        "Takes no parameters.";
+    listProcesses.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", nlohmann::json::object()},
+        {"additionalProperties", false}
+    };
+    listProcesses.handler = [link](const nlohmann::json& /*arguments*/) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("list_processes: plugin link is not configured");
+
+        ToolResult result;
+        result.structuredContent = link->Call("process.list", nlohmann::json::object());
+        const nlohmann::json processes = result.structuredContent.value("processes", nlohmann::json::array());
+        result.text = FormatProcessList(processes, result.structuredContent.value("truncated", false));
+        return result;
+    };
+    registry.Add(std::move(listProcesses));
+
+    Tool attachProcess;
+    attachProcess.name = "attach_process";
+    attachProcess.description =
+        "Attach the debugger to an already-running process and wait for "
+        "it to stop, so it can be inspected the same way as a process "
+        "launched from x64dbg. Use list_processes first to find the PID "
+        "of the process to attach to. Returns the same paused-state shape "
+        "as debug_control and wait_until_paused: 'paused', 'timed_out', "
+        "'pause_reason', and 'status'. If the wait times out, 'timed_out' "
+        "is true and the process keeps running under the debugger; call "
+        "wait_until_paused to keep waiting. Constraints: fails if a "
+        "debugging session is already active — detach or stop it first; "
+        "the target must be attachable, meaning it matches this debugger "
+        "build's architecture (32-bit vs 64-bit) and this process has "
+        "sufficient privileges to attach to it; attaching freezes the "
+        "target for as long as it stays paused, so anything relying on it "
+        "(its UI, its network connections) stalls while the debugger "
+        "holds it. SAFETY: once attached, debug_control with action "
+        "'stop' TERMINATES the process — including this one, which the "
+        "tool did not start and which was already running beforehand. To "
+        "inspect a process and leave it running afterwards, use "
+        "detach_process instead of debug_control's 'stop'. Parameters: "
+        "'pid' — the process identifier to attach to, as reported by "
+        "list_processes; 'timeout_ms' — maximum time to wait for the "
+        "process to pause, in milliseconds; if omitted, the plugin's "
+        "default timeout is used.";
+    attachProcess.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"pid", {
+                {"type", "integer"},
+                {"minimum", 1},
+                {"description", "Process identifier (PID) to attach to, as reported by list_processes."}
+            }},
+            {"timeout_ms", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Maximum time to wait for the process to pause, in milliseconds. If "
+                 "omitted, the plugin's default timeout is used."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"pid"})},
+        {"additionalProperties", false}
+    };
+    attachProcess.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("attach_process: plugin link is not configured");
+
+        if (!arguments.contains("pid") || !arguments["pid"].is_number_integer() ||
+            arguments["pid"].get<long long>() < 1)
+            throw ToolError("attach_process: 'pid' is required and must be a positive integer");
+        const long long pid = arguments["pid"].get<long long>();
+
+        nlohmann::json params = {{"pid", pid}};
+        if (arguments.contains("timeout_ms"))
+        {
+            RequireNonNegativeInteger(arguments, "timeout_ms", "attach_process");
+            params["timeoutMs"] = arguments["timeout_ms"].get<long long>();
+        }
+
+        ToolResult result;
+        result.structuredContent = link->Call("debug.attach", params, RequestTimeoutMs(arguments));
+        result.text = FormatPauseResult(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(attachProcess));
+
+    Tool detachProcess;
+    detachProcess.name = "detach_process";
+    detachProcess.description =
+        "Detach the debugger from the debuggee, leaving it running "
+        "exactly as it would without a debugger attached — unlike "
+        "debug_control's 'stop' action, which TERMINATES the process. "
+        "Detaching removes all breakpoints first, since a software "
+        "breakpoint left behind would crash the target the next time "
+        "execution reached that address with no debugger there to catch "
+        "it. Use this after attach_process when the goal was only to "
+        "inspect a running process and it should keep running "
+        "afterwards. Requires an active debugging session. Takes no "
+        "parameters.";
+    detachProcess.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", nlohmann::json::object()},
+        {"additionalProperties", false}
+    };
+    detachProcess.handler = [link](const nlohmann::json& /*arguments*/) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("detach_process: plugin link is not configured");
+
+        ToolResult result;
+        result.structuredContent = link->Call("debug.detach", nlohmann::json::object());
+        result.text = FormatDetachResult();
+        return result;
+    };
+    registry.Add(std::move(detachProcess));
+
+    Tool allocateMemory;
+    allocateMemory.name = "allocate_memory";
+    allocateMemory.description =
+        "Allocate a block of memory inside the debugged process and "
+        "return its address. The memory is readable, writable, and "
+        "executable, so it can hold injected code as well as data — for "
+        "example a buffer to redirect a pointer at, scratch space for a "
+        "script, or a small stub to jump to. Requires an active debugging "
+        "session. The allocation belongs to the debuggee: it lives only "
+        "as long as the process does, and disappears (like all its other "
+        "memory) when the process exits. 'address', if given, is only a "
+        "preferred base — the allocation may still land elsewhere if that "
+        "address is unavailable; always use the address this tool "
+        "returns, not the one requested. Allocates at most 268435456 bytes "
+        "(256 MiB) per call. Parameters: 'size' — the number of bytes to "
+        "allocate, from 1 up to 268435456; 'address' — an optional "
+        "non-negative integer giving a preferred base address (0 or "
+        "omitted means let the debugger choose).";
+    allocateMemory.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"size", {
+                {"type", "integer"},
+                {"minimum", 1},
+                {"maximum", 268435456},
+                {"description", "Number of bytes to allocate, from 1 up to 268435456 (256 MiB) per call."}
+            }},
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Preferred base address, given as a number (not a hex string). 0 "
+                 "or omitted means let the debugger choose an address."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"size"})},
+        {"additionalProperties", false}
+    };
+    allocateMemory.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("allocate_memory: plugin link is not configured");
+
+        if (!arguments.contains("size") || !arguments["size"].is_number_integer() ||
+            arguments["size"].get<long long>() < 1)
+            throw ToolError("allocate_memory: 'size' is required and must be a positive integer");
+        const long long size = arguments["size"].get<long long>();
+
+        nlohmann::json params = {{"size", size}};
+        if (arguments.contains("address"))
+        {
+            RequireNonNegativeInteger(arguments, "address", "allocate_memory");
+            params["address"] = arguments["address"].get<std::uint64_t>();
+        }
+
+        ToolResult result;
+        result.structuredContent = link->Call("memory.allocate", params);
+        result.text = FormatAllocateMemoryResult(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(allocateMemory));
+
+    Tool freeMemory;
+    freeMemory.name = "free_memory";
+    freeMemory.description =
+        "Free memory previously allocated with allocate_memory. 'address' "
+        "must be exactly the base address returned by that allocation, "
+        "not an arbitrary address inside the allocated region — freeing "
+        "anything else, including memory the debuggee itself allocated, "
+        "corrupts the process's heap and will likely crash it. Requires "
+        "an active debugging session. Parameters: 'address' — the base "
+        "address of the allocation to free, as returned by "
+        "allocate_memory.";
+    freeMemory.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Base address of the allocation to free, given as a number (not a "
+                 "hex string), as returned by allocate_memory."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"address"})},
+        {"additionalProperties", false}
+    };
+    freeMemory.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("free_memory: plugin link is not configured");
+
+        RequireNonNegativeInteger(arguments, "address", "free_memory");
+        const std::uint64_t address = arguments["address"].get<std::uint64_t>();
+
+        ToolResult result;
+        result.structuredContent = link->Call("memory.free", {{"address", address}});
+        result.text = FormatFreeMemoryResult(address);
+        return result;
+    };
+    registry.Add(std::move(freeMemory));
+
+    Tool dumpMemory;
+    dumpMemory.name = "dump_memory";
+    dumpMemory.description =
+        "Write a region of the debuggee's memory to a file on disk, byte "
+        "for byte. Use it to carve out an unpacked image, a decrypted "
+        "buffer, or an embedded resource for offline analysis with tools "
+        "outside the debugger. For anything small enough to inspect "
+        "directly, read_memory is the better choice — it returns the "
+        "bytes straight to the model instead of round-tripping through a "
+        "file; dump_memory is for large regions and for handing data to "
+        "external tools. Requires an active debugging session; the "
+        "address range must be mapped and readable. Dumps at most "
+        "268435456 bytes (256 MiB) per call. 'path' is a path on the "
+        "machine running x64dbg, not inside the debuggee, and an existing "
+        "file at that path is overwritten without warning. Parameters: "
+        "'address' — a non-negative integer giving the starting address "
+        "to dump (a number, not a hex string); 'size' — the number of "
+        "bytes to dump, from 1 up to 268435456; 'path' — the destination "
+        "file path.";
+    dumpMemory.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description", "Starting address to dump, given as a number (not a hex string)."}
+            }},
+            {"size", {
+                {"type", "integer"},
+                {"minimum", 1},
+                {"maximum", 268435456},
+                {"description", "Number of bytes to dump, from 1 up to 268435456 (256 MiB) per call."}
+            }},
+            {"path", {
+                {"type", "string"},
+                {"description", "Destination file path on the machine running x64dbg. An existing file is overwritten."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"address", "size", "path"})},
+        {"additionalProperties", false}
+    };
+    dumpMemory.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("dump_memory: plugin link is not configured");
+
+        RequireNonNegativeInteger(arguments, "address", "dump_memory");
+        if (!arguments.contains("size") || !arguments["size"].is_number_integer())
+            throw ToolError("dump_memory: 'size' must be a positive integer");
+        const long long size = arguments["size"].get<long long>();
+        if (size < 1 || size > 268435456)
+            throw ToolError("dump_memory: 'size' must be between 1 and 268435456 bytes (256 MiB)");
+        if (!arguments.contains("path") || !arguments["path"].is_string())
+            throw ToolError("dump_memory: 'path' is required and must be a string");
+
+        const std::uint64_t address = arguments["address"].get<std::uint64_t>();
+        const std::string path = arguments["path"].get<std::string>();
+
+        ToolResult result;
+        result.structuredContent = link->Call("memory.dump", {
+            {"address", address},
+            {"size", size},
+            {"path", path}
+        });
+        result.text = FormatDumpMemoryResult(result.structuredContent, address);
+        return result;
+    };
+    registry.Add(std::move(dumpMemory));
 }
 
 } // namespace x64dbg_mcp::bridge

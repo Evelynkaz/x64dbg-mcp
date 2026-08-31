@@ -8,7 +8,7 @@
 namespace x64dbg_mcp::bridge
 {
 
-// Registers thirty-nine debugger tools: debugger_status,
+// Registers forty-five debugger tools: debugger_status,
 // read_memory, disassemble, debug_control, step, wait_until_paused,
 // set_breakpoint, manage_breakpoint, list_breakpoints, list_modules,
 // module_info, memory_map, list_threads, read_registers, call_stack,
@@ -17,9 +17,11 @@ namespace x64dbg_mcp::bridge
 // read_log, write_memory, set_register, assemble_at, patches,
 // set_page_rights, trace_until, trace_record, run_to_user_code,
 // code_coverage, list_symbols, annotate, list_handles, list_windows,
-// list_connections and seh_chain. Each talks to the x64dbg plugin
-// through link. Together with server_status, registered separately in
-// tool_registry.cpp, the server exposes forty tools to the model.
+// list_connections, seh_chain, list_processes, attach_process,
+// detach_process, allocate_memory, free_memory and dump_memory. Each
+// talks to the x64dbg plugin through link. Together with server_status,
+// registered separately in tool_registry.cpp, the server exposes
+// forty-six tools to the model.
 void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> link);
 
 } // namespace x64dbg_mcp::bridge

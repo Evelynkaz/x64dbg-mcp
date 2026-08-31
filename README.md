@@ -7,13 +7,14 @@ An MCP server for the [x64dbg](https://x64dbg.com/) debugger. It gives an AI age
 ## What it can do
 
 - Inspect the debugger state: whether a session exists, running or paused, process and thread IDs, pointer size, current instruction pointer.
-- Read raw memory, disassemble code, and read strings, all with human-readable formatting alongside the structured data.
+- Read raw memory, disassemble code, and read strings, all with human-readable formatting alongside the structured data, and dump a memory region straight to a file for offline analysis.
+- List running processes and attach the debugger to one already running, then detach again leaving it untouched.
 - Control execution: run, pause, stop, restart, run to an address, step into/over/out, and run until the program's own code is reached again.
 - Set, manage, and list breakpoints, software, hardware, and memory, with conditions and logging.
 - Trace execution and record code coverage, so analyzing packed or obfuscated code does not need one round trip per instruction.
 - Search memory for byte patterns and list cross-references to an address.
 - List loaded modules, the memory map, threads, open handles, windows, and network connections.
-- Write to the debuggee: patch memory, assemble instructions in place, change registers, and run arbitrary x64dbg commands and scripts.
+- Write to the debuggee: patch memory, assemble instructions in place, change registers, allocate and free memory, and run arbitrary x64dbg commands and scripts.
 - Read and write the debugger's own labels, comments, and bookmarks, so a finding persists across sessions.
 
 ## Example
@@ -149,6 +150,16 @@ Running, stopping, and stepping the debuggee.
 | `step` | Steps into, over, or out of the current instruction, one or many steps per call. |
 | `run_to_user_code` | Resumes execution until control returns to the program's own code, skipping system library code. |
 
+### Processes
+
+Finding a process to attach to, and attaching to or detaching from it.
+
+| Tool | What it does |
+|---|---|
+| `list_processes` | Lists processes running on the system, with PID, executable name, and window title, for picking an attach target. |
+| `attach_process` | Attaches the debugger to an already-running process and waits for it to pause. |
+| `detach_process` | Detaches from the debuggee, leaving it running, unlike stopping it. |
+
 ### Breakpoints
 
 Setting and managing software, hardware, and memory breakpoints.
@@ -190,6 +201,9 @@ Changing the debuggee's memory, registers, and page protection.
 | `assemble_at` | Assembles one instruction and writes it at the given address. |
 | `patches` | Lists recorded patches, restores them, or writes them into a copy of the file on disk. |
 | `set_page_rights` | Changes the memory protection of the region containing an address. |
+| `allocate_memory` | Allocates a block of readable, writable, executable memory inside the debuggee. |
+| `free_memory` | Frees memory previously allocated with `allocate_memory`. |
+| `dump_memory` | Writes a region of the debuggee's memory to a file on disk. |
 
 ### Tracing and coverage
 
@@ -224,7 +238,7 @@ What the debuggee has opened outside its own memory: kernel objects, windows, an
 
 ## Security and risks
 
-This server gives the model full access to the debugger: reading memory, controlling execution, setting breakpoints, and, just as much, writing to the debuggee — patching memory, assembling instructions, changing registers, and running arbitrary x64dbg commands and scripts in the debuggee's own context. Please read this before pointing it at anything important:
+This server gives the model full access to the debugger: reading memory, controlling execution, setting breakpoints, and, just as much, writing to the debuggee — patching memory, assembling instructions, changing registers, and running arbitrary x64dbg commands and scripts in the debuggee's own context. It can also attach to a process the user did not start from x64dbg, allocate executable memory inside a process, and write regions of process memory to files on disk. Please read this before pointing it at anything important:
 
 - Only debug code you are prepared to lose, and preferably do it in an isolated environment: the debuggee actually runs, it is not simulated.
 - The named pipe is restricted to the owner of the session and the system; remote connections are rejected.
@@ -270,10 +284,11 @@ The C runtime is linked statically, so there is nothing extra to redistribute al
 | Multiple x64dbg instances running | The pipe name is taken; the second plugin picks a name that includes its process ID and logs it | Pass that name to the server with `--pipe <name>` |
 | The client sees no tools | The server did not start | Run `x64dbg-mcp.exe --help` by hand and check its stderr output |
 | Need a detailed log | | Pass `--log-level debug`; the log is written to stderr |
+| `attach_process` reports that no debugging session started, or attaching appears to hang | Another x64dbg plugin is showing a modal dialog. ScyllaHide, commonly installed for anti-anti-debugging work, shows an error dialog during attach (for example "NtSetInformationThread is already hooked!"), and x64dbg does not finish attaching until it is dismissed | Switch to the x64dbg window and dismiss the dialog, then retry. The plugin cannot dismiss another plugin's dialog on your behalf |
 
 ## Limitations
 
-Not implemented yet: MCP resources and prompts (the disassembly and memory-map resources, the x64dbg command reference resource, and the scenario prompts described in `docs/tools.md`), attaching x64dbg to an already-running process from these tools (a debugging session still has to be started or attached by hand in x64dbg first), dumping a memory region straight to a file, a function's control-flow graph, and configuring the log text and condition used during tracing. A handful of convenience tools that would bundle several existing calls into one — a post-halt snapshot, a one-call function breakdown, searching for immediate values, and a registers diff — are also planned but not built. Deliberately out of scope for now: working with types and structures, graphical interaction, managing x64dbg windows, and source-level debugging. See `docs/tools.md` for the full roadmap.
+Not implemented yet: MCP resources and prompts (the disassembly and memory-map resources, the x64dbg command reference resource, and the scenario prompts described in `docs/tools.md`), a function's control-flow graph, and configuring the log text and condition used during tracing. A handful of convenience tools that would bundle several existing calls into one — a post-halt snapshot, a one-call function breakdown, searching for immediate values, and a registers diff — are also planned but not built. Deliberately out of scope for now: working with types and structures, graphical interaction, managing x64dbg windows, and source-level debugging. See `docs/tools.md` for the full roadmap.
 
 ## License
 
