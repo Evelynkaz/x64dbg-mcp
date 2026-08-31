@@ -4,6 +4,8 @@
 #include "pluginsdk/_scriptapi_module.h"
 #include "pluginsdk/_scriptapi_pattern.h"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -309,6 +311,80 @@ std::string TraceRecordByteTypeToString(TRACERECORDBYTETYPE type)
     case DataMixed: return "dataMixed";
     case InstructionDataMixed: return "instructionDataMixed";
     default: return "unknown";
+    }
+}
+
+std::string ToLowerCopy(const std::string& text)
+{
+    std::string result = text;
+    std::transform(result.begin(), result.end(), result.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return result;
+}
+
+// Context threaded through CbSymbolEnum via DbgSymbolEnum's user pointer.
+struct SymbolEnumContext
+{
+    std::vector<SymbolEntry>* out = nullptr;
+    std::string filterLower;
+    size_t cap = 0;
+    bool truncated = false;
+};
+
+// Appends one symbol into *user (a SymbolEnumContext) if it passes the
+// filter. Enumeration is stopped early once the cap is reached by returning
+// false here: SymEnum (external/x64dbg/src/dbg/symbolinfo.cpp) checks the
+// callback's return value and stops calling it as soon as it sees false.
+// Must not throw: this is invoked as a raw C callback from inside the
+// debugger core, where an exception crossing that boundary is undefined
+// behavior.
+bool CbSymbolEnum(const SYMBOLPTR_* symbol, void* user)
+{
+    try
+    {
+        auto* ctx = static_cast<SymbolEnumContext*>(user);
+
+        // SYMBOLINFOCPP (bridgemain.h) is an RAII wrapper around SYMBOLINFO
+        // whose destructor calls BridgeFree on decoratedSymbol/undecoratedSymbol
+        // whenever the corresponding freeDecorated/freeUndecorated flag is
+        // set, so the free cannot be skipped on any path, including the
+        // early returns below.
+        SYMBOLINFOCPP info;
+        DbgGetSymbolInfo(symbol, &info);
+
+        // Per the header comment on CBSYMBOLENUM, "The SYMBOLPTR* becomes
+        // invalid when the module is unloaded" and must not be stored —
+        // only the strings copied out of info below are kept.
+        SymbolEntry entry;
+        entry.address = static_cast<unsigned long long>(info.addr);
+        entry.ordinal = static_cast<unsigned int>(info.ordinal);
+        switch (info.type)
+        {
+        case sym_import: entry.type = "import"; break;
+        case sym_export: entry.type = "export"; break;
+        default: entry.type = "symbol"; break;
+        }
+
+        const std::string decorated = info.decoratedSymbol ? info.decoratedSymbol : "";
+        const std::string undecorated = info.undecoratedSymbol ? info.undecoratedSymbol : "";
+        entry.name = !undecorated.empty() ? undecorated : decorated;
+        if (!decorated.empty() && decorated != entry.name)
+            entry.decoratedName = decorated;
+
+        if (!ctx->filterLower.empty() && ToLowerCopy(entry.name).find(ctx->filterLower) == std::string::npos)
+            return true; // filtered out; keep enumerating
+
+        ctx->out->push_back(std::move(entry));
+        if (ctx->out->size() >= ctx->cap)
+        {
+            ctx->truncated = true;
+            return false; // cap reached: stop enumerating
+        }
+        return true;
+    }
+    catch (...)
+    {
+        return false; // never let an exception escape into the debugger
     }
 }
 
@@ -1856,6 +1932,140 @@ bool GetFunctionRange(unsigned long long address, unsigned long long& start, uns
         start = 0;
         end = 0;
         error = "Internal error while retrieving the function boundaries";
+        return false;
+    }
+}
+
+bool ListSymbols(unsigned long long moduleAddress, const std::string& filter,
+                 size_t maxResults, std::vector<SymbolEntry>& out, bool& truncated,
+                 std::string& error)
+{
+    out.clear();
+    truncated = false;
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        // Resolves moduleAddress to the module's base, reusing the same
+        // lookup GetModuleDetails already does, rather than duplicating it.
+        ModuleDetails details;
+        if (!GetModuleDetails(std::string(), moduleAddress, true, false, false, details, error))
+            return false;
+
+        SymbolEnumContext ctx;
+        ctx.out = &out;
+        ctx.filterLower = ToLowerCopy(filter);
+        ctx.cap = (maxResults == 0 || maxResults > kMaxSymbolResults) ? kMaxSymbolResults : maxResults;
+
+        DbgSymbolEnum(static_cast<duint>(details.module.base), &CbSymbolEnum, &ctx);
+
+        truncated = ctx.truncated;
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        truncated = false;
+        error = "Internal error while listing symbols";
+        return false;
+    }
+}
+
+bool GetAnnotations(unsigned long long address, Annotations& out, std::string& error)
+{
+    out = Annotations{};
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        const duint addr = static_cast<duint>(address);
+
+        // A missing label or comment is not an error, it is an empty string
+        // — DbgGetLabelAt/DbgGetCommentAt return false in that case.
+        char label[MAX_LABEL_SIZE] = {};
+        if (DbgGetLabelAt(addr, SEG_DEFAULT, label))
+            out.label = label;
+
+        char comment[MAX_COMMENT_SIZE] = {};
+        if (DbgGetCommentAt(addr, comment))
+            out.comment = comment;
+
+        out.bookmark = DbgGetBookmarkAt(addr);
+        return true;
+    }
+    catch (...)
+    {
+        out = Annotations{};
+        error = "Internal error while reading annotations";
+        return false;
+    }
+}
+
+bool SetLabel(unsigned long long address, const std::string& text, std::string& error)
+{
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        // An empty text clears the label, see LabelSet in
+        // external/x64dbg/src/dbg/label.cpp; DbgSetLabelAt rejects text that
+        // is too long or begins with the internal delimiter '\1'.
+        if (!DbgSetLabelAt(static_cast<duint>(address), text.c_str()))
+        {
+            error = "Failed to set the label: text may be too long, or begin with a reserved character";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while setting the label";
+        return false;
+    }
+}
+
+bool SetComment(unsigned long long address, const std::string& text, std::string& error)
+{
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        // An empty text clears the comment, same as SetLabel.
+        if (!DbgSetCommentAt(static_cast<duint>(address), text.c_str()))
+        {
+            error = "Failed to set the comment: text may be too long, or begin with a reserved character";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while setting the comment";
+        return false;
+    }
+}
+
+bool SetBookmark(unsigned long long address, bool enabled, std::string& error)
+{
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        if (!DbgSetBookmarkAt(static_cast<duint>(address), enabled))
+        {
+            error = "Failed to set the bookmark";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while setting the bookmark";
         return false;
     }
 }

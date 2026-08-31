@@ -982,6 +982,82 @@ std::string FormatCoverageRead(const nlohmann::json& result)
     return out.str();
 }
 
+// Aligned table of symbols: address, type, name — in the order the plugin
+// returned them (imports and exports are not re-sorted). Followed by a
+// count line and, if the result was truncated at the requested limit, a
+// line about it.
+std::string FormatSymbolList(const nlohmann::json& symbols, bool truncated)
+{
+    std::ostringstream out;
+    out << std::left
+        << std::setw(18) << "Address"
+        << std::setw(10) << "Type"
+        << "Name" << '\n';
+
+    for (const auto& symbol : symbols)
+    {
+        const std::uint64_t address = symbol.value("address", 0ULL);
+        const std::string type = symbol.value("type", std::string());
+        const std::string name = symbol.value("name", std::string());
+
+        std::ostringstream addressText;
+        addressText << "0x" << std::hex << address;
+
+        out << std::left
+            << std::setw(18) << addressText.str()
+            << std::setw(10) << type
+            << name << '\n';
+    }
+    out << std::dec << symbols.size() << " symbol" << (symbols.size() == 1 ? "" : "s") << ".\n";
+    if (truncated)
+        out << "Result truncated at the requested limit; more symbols may exist.\n";
+    return out.str();
+}
+
+// Human-readable summary of annotations.get: the address and each
+// annotation present at it (label, comment, bookmark); says plainly when
+// there are none.
+std::string FormatAnnotationsGet(const nlohmann::json& result)
+{
+    const std::uint64_t address = result.value("address", 0ULL);
+    const std::string label = result.value("label", std::string());
+    const std::string comment = result.value("comment", std::string());
+    const bool bookmark = result.value("bookmark", false);
+
+    std::ostringstream out;
+    out << "0x" << std::hex << address << ":\n";
+    if (label.empty() && comment.empty() && !bookmark)
+    {
+        out << "No annotations at this address.\n";
+        return out.str();
+    }
+    if (!label.empty())
+        out << "  Label: " << label << '\n';
+    if (!comment.empty())
+        out << "  Comment: " << comment << '\n';
+    if (bookmark)
+        out << "  Bookmark: set\n";
+    return out.str();
+}
+
+// Human-readable confirmation of annotations.set: exactly what was applied
+// at the address, distinguishing a value that was set from one that was
+// cleared (an empty label/comment, or a bookmark passed as false).
+std::string FormatAnnotationsSet(std::uint64_t address, bool hasLabel, const std::string& label,
+                                  bool hasComment, const std::string& comment,
+                                  bool hasBookmark, bool bookmark)
+{
+    std::ostringstream out;
+    out << "Applied at 0x" << std::hex << address << ":\n";
+    if (hasLabel)
+        out << "  Label " << (label.empty() ? "cleared." : ("set to '" + label + "'.")) << '\n';
+    if (hasComment)
+        out << "  Comment " << (comment.empty() ? "cleared." : ("set to '" + comment + "'.")) << '\n';
+    if (hasBookmark)
+        out << "  Bookmark " << (bookmark ? "set." : "cleared.") << '\n';
+    return out.str();
+}
+
 } // namespace
 
 void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> link)
@@ -3217,6 +3293,216 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(codeCoverage));
+
+    Tool listSymbols;
+    listSymbols.name = "list_symbols";
+    listSymbols.description =
+        "List the symbols of a module — imports, exports, and any symbols "
+        "loaded from debug information — together with their addresses. "
+        "Identify the module either by 'module' (its name) or by 'address' "
+        "(any address that falls inside it); exactly one of the two must be "
+        "given. Use this tool to find the address of a function by name, to "
+        "discover which API a module imports, or to get an overview of what "
+        "a module offers. 'filter' matches part of a symbol's name "
+        "case-insensitively, which is the practical way to search a large "
+        "system library instead of scanning its whole symbol table. "
+        "'max_results' caps the number of symbols returned, defaulting to "
+        "1000; the result's 'truncated' field, and the human-readable text, "
+        "say plainly when the list was truncated. Symbols come from what "
+        "the debugger has already loaded: a module without debug "
+        "information shows only its imports and exports. Requires an "
+        "active debugging session; fails if no module matches 'module' or "
+        "'address'.";
+    listSymbols.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Any address inside the module, given as a number (not a hex "
+                 "string). Mutually exclusive with 'module'."}
+            }},
+            {"module", {
+                {"type", "string"},
+                {"description", "Name of the module to list symbols of, e.g. 'ntdll.dll'. Mutually exclusive with 'address'."}
+            }},
+            {"filter", {
+                {"type", "string"},
+                {"description",
+                 "Case-insensitive substring to match against symbol names; only "
+                 "matching symbols are returned. Omit to list every symbol."}
+            }},
+            {"max_results", {
+                {"type", "integer"},
+                {"minimum", 1},
+                {"default", 1000},
+                {"description", "Maximum number of symbols to return. Defaults to 1000."}
+            }}
+        }},
+        {"anyOf", nlohmann::json::array({
+            { {"required", nlohmann::json::array({"address"})} },
+            { {"required", nlohmann::json::array({"module"})} }
+        })},
+        {"additionalProperties", false}
+    };
+    listSymbols.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("list_symbols: plugin link is not configured");
+
+        if (!arguments.contains("address") && !arguments.contains("module"))
+            throw ToolError("list_symbols: either 'address' or 'module' must be provided");
+
+        nlohmann::json params = nlohmann::json::object();
+        if (arguments.contains("address"))
+        {
+            RequireNonNegativeInteger(arguments, "address", "list_symbols");
+            params["address"] = arguments["address"].get<std::uint64_t>();
+        }
+        if (arguments.contains("module"))
+        {
+            if (!arguments["module"].is_string())
+                throw ToolError("list_symbols: 'module' must be a string");
+            params["module"] = arguments["module"].get<std::string>();
+        }
+        if (arguments.contains("filter"))
+        {
+            if (!arguments["filter"].is_string())
+                throw ToolError("list_symbols: 'filter' must be a string");
+            params["filter"] = arguments["filter"].get<std::string>();
+        }
+        long long maxResults = 1000;
+        if (arguments.contains("max_results"))
+        {
+            if (!arguments["max_results"].is_number_integer() || arguments["max_results"].get<long long>() < 1)
+                throw ToolError("list_symbols: 'max_results' must be a positive integer");
+            maxResults = arguments["max_results"].get<long long>();
+        }
+        params["max_results"] = maxResults;
+
+        ToolResult result;
+        result.structuredContent = link->Call("symbols.list", params);
+        const nlohmann::json symbols = result.structuredContent.value("symbols", nlohmann::json::array());
+        result.text = FormatSymbolList(symbols, result.structuredContent.value("truncated", false));
+        return result;
+    };
+    registry.Add(std::move(listSymbols));
+
+    Tool annotate;
+    annotate.name = "annotate";
+    annotate.description =
+        "Read or write the debugger's own annotations at an address: a "
+        "label (a name shown in place of the address), a comment (free "
+        "text shown beside the instruction), and a bookmark (a marked "
+        "position). WHY THIS MATTERS: these are stored in x64dbg's "
+        "database for the analysed program and persist across sessions, "
+        "so naming a function once its purpose is understood, or writing "
+        "down a conclusion as a comment, makes that finding part of the "
+        "project rather than something only visible in the current "
+        "conversation. Use action 'get' to read the annotations currently "
+        "at 'address'; use action 'set' to write them — at least one of "
+        "'label', 'comment', or 'bookmark' must be given for 'set'. An "
+        "empty string for 'label' or 'comment' CLEARS that annotation "
+        "instead of setting it. Recommended practice: label a function as "
+        "soon as its purpose is understood, and comment the instruction "
+        "that made it clear. LIMITS: requires an active debugging "
+        "session; a label replaces the name displayed for that address "
+        "everywhere in the debugger (disassembly, call stacks, breakpoint "
+        "lists, and so on), so choose names that will still make sense "
+        "later.";
+    annotate.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"action", {
+                {"type", "string"},
+                {"enum", nlohmann::json::array({"get", "set"})},
+                {"description", "'get' reads the annotations at 'address', 'set' writes them."}
+            }},
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description", "Address to read or write annotations for, given as a number (not a hex string)."}
+            }},
+            {"label", {
+                {"type", "string"},
+                {"description",
+                 "New label for the address. An empty string clears the existing "
+                 "label. Only used, and optional, with action 'set'."}
+            }},
+            {"comment", {
+                {"type", "string"},
+                {"description",
+                 "New comment for the address. An empty string clears the existing "
+                 "comment. Only used, and optional, with action 'set'."}
+            }},
+            {"bookmark", {
+                {"type", "boolean"},
+                {"description",
+                 "Whether a bookmark should be set (true) or cleared (false) at the "
+                 "address. Only used, and optional, with action 'set'."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"action", "address"})},
+        {"additionalProperties", false}
+    };
+    annotate.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("annotate: plugin link is not configured");
+
+        const std::string action = RequireEnumString(arguments, "action", {"get", "set"}, "annotate");
+        RequireNonNegativeInteger(arguments, "address", "annotate");
+        const std::uint64_t address = arguments["address"].get<std::uint64_t>();
+
+        ToolResult result;
+        if (action == "get")
+        {
+            result.structuredContent = link->Call("annotations.get", {{"address", address}});
+            result.text = FormatAnnotationsGet(result.structuredContent);
+        }
+        else
+        {
+            const bool hasLabel = arguments.contains("label");
+            const bool hasComment = arguments.contains("comment");
+            const bool hasBookmark = arguments.contains("bookmark");
+            if (!hasLabel && !hasComment && !hasBookmark)
+                throw ToolError("annotate: 'set' requires at least one of 'label', 'comment', 'bookmark'");
+
+            std::string label, comment;
+            bool bookmark = false;
+
+            nlohmann::json params = {{"address", address}};
+            if (hasLabel)
+            {
+                if (!arguments["label"].is_string())
+                    throw ToolError("annotate: 'label' must be a string");
+                label = arguments["label"].get<std::string>();
+                params["label"] = label;
+            }
+            if (hasComment)
+            {
+                if (!arguments["comment"].is_string())
+                    throw ToolError("annotate: 'comment' must be a string");
+                comment = arguments["comment"].get<std::string>();
+                params["comment"] = comment;
+            }
+            if (hasBookmark)
+            {
+                if (!arguments["bookmark"].is_boolean())
+                    throw ToolError("annotate: 'bookmark' must be a boolean");
+                bookmark = arguments["bookmark"].get<bool>();
+                params["bookmark"] = bookmark;
+            }
+
+            result.structuredContent = link->Call("annotations.set", params);
+            result.text = FormatAnnotationsSet(address, hasLabel, label, hasComment, comment, hasBookmark, bookmark);
+        }
+        return result;
+    };
+    registry.Add(std::move(annotate));
 }
 
 } // namespace x64dbg_mcp::bridge

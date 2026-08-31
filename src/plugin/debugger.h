@@ -258,6 +258,58 @@ bool GetXrefs(unsigned long long address, std::vector<XrefEntry>& out, std::stri
 // Boundaries of the function containing an address. Requires active debugging.
 bool GetFunctionRange(unsigned long long address, unsigned long long& start, unsigned long long& end, std::string& error);
 
+// Upper limit on the number of symbols returned by a single ListSymbols call:
+// large system modules can have tens of thousands, and a full list would
+// flood the model's context.
+constexpr size_t kMaxSymbolResults = 4096;
+
+// A single symbol (import, export, or debug symbol) of a module.
+struct SymbolEntry
+{
+    unsigned long long address = 0;
+    std::string name;            // undecorated when available, otherwise decorated
+    std::string decoratedName;   // only when it differs from name
+    std::string type;            // "import" | "export" | "symbol"
+    unsigned int ordinal = 0;
+};
+
+// Enumerates symbols of the module containing moduleAddress. filter, when
+// non-empty, keeps only symbols whose name contains it (case-insensitive).
+// Requires active debugging; does not require a pause, since it reads the
+// module's static symbol database rather than live process state.
+bool ListSymbols(unsigned long long moduleAddress, const std::string& filter,
+                 size_t maxResults, std::vector<SymbolEntry>& out, bool& truncated,
+                 std::string& error);
+
+// A label, comment, and bookmark at one address. Empty label/comment means
+// none is set, which is a normal result, not an error.
+struct Annotations
+{
+    std::string label;
+    std::string comment;
+    bool bookmark = false;
+};
+
+// Reads the label, comment, and bookmark at address. Requires active
+// debugging; does not require a pause, for the same reason as ListSymbols.
+bool GetAnnotations(unsigned long long address, Annotations& out, std::string& error);
+
+// Sets the label at address. An empty text CLEARS the label — that is how
+// x64dbg models removal (see LabelSet in external/x64dbg/src/dbg/label.cpp).
+// Requires active debugging; does not require a pause: this only touches the
+// label database, not memory or registers that could change mid-write while
+// the process runs.
+bool SetLabel(unsigned long long address, const std::string& text, std::string& error);
+
+// Sets the comment at address. An empty text CLEARS the comment, same as
+// SetLabel. Requires active debugging; does not require a pause, for the
+// same reason as SetLabel.
+bool SetComment(unsigned long long address, const std::string& text, std::string& error);
+
+// Sets or clears the bookmark at address. Requires active debugging; does
+// not require a pause, for the same reason as SetLabel.
+bool SetBookmark(unsigned long long address, bool enabled, std::string& error);
+
 // Upper limit on the number of lines returned by a single ReadLog call.
 constexpr size_t kMaxLogLines = 1000;
 

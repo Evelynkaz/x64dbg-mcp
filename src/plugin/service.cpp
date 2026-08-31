@@ -1179,6 +1179,194 @@ std::string HandleFunctionDisasm(DebuggerWorker& worker, const nlohmann::json& i
     return BuildOkResponse(id, result);
 }
 
+struct ListSymbolsOutcome
+{
+    bool ok = false;
+    std::vector<SymbolEntry> symbols;
+    bool truncated = false;
+    std::string error;
+};
+
+std::string HandleSymbolsList(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    const bool hasAddress = params.is_object() && params.contains("address");
+    const bool hasModule = params.is_object() && params.contains("module");
+    if (hasAddress == hasModule)
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument,
+            "Provide either parameter \"address\" or parameter \"module\", but not both");
+
+    std::string paramError;
+    unsigned long long address = 0;
+    std::string moduleName;
+    if (hasAddress)
+    {
+        if (!GetUint64Param(params, "address", address, paramError))
+            return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+    }
+    else if (!GetRequiredStringParam(params, "module", moduleName, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    std::string filter;
+    if (!GetOptionalStringParam(params, "filter", "", filter, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    int maxResults = 1000;
+    if (!GetOptionalIntParam(params, "max_results", 1000, maxResults, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+    if (maxResults < 1)
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, "Parameter \"max_results\" must be greater than zero");
+
+    auto outcome = std::make_shared<ListSymbolsOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, hasModule, moduleName, address, filter, maxResults]
+        {
+            // Reuses the existing module lookup (GetModuleDetails) to
+            // resolve a module name to its base address, same pattern as
+            // HandlePatternFind's "module" parameter.
+            unsigned long long moduleAddress = address;
+            if (hasModule)
+            {
+                ModuleDetails details;
+                std::string moduleError;
+                if (!GetModuleDetails(moduleName, 0, false, false, false, details, moduleError))
+                {
+                    outcome->ok = false;
+                    outcome->error = moduleError;
+                    return;
+                }
+                moduleAddress = details.module.base;
+            }
+            outcome->ok = ListSymbols(moduleAddress, filter, static_cast<size_t>(maxResults),
+                outcome->symbols, outcome->truncated, outcome->error);
+        },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& sym : outcome->symbols)
+    {
+        nlohmann::json item;
+        item["address"] = sym.address;
+        item["name"] = sym.name;
+        item["decoratedName"] = sym.decoratedName;
+        item["type"] = sym.type;
+        item["ordinal"] = sym.ordinal;
+        list.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["symbols"] = list;
+    result["truncated"] = outcome->truncated;
+    return BuildOkResponse(id, result);
+}
+
+struct AnnotationsOutcome
+{
+    bool ok = false;
+    Annotations annotations;
+    std::string error;
+};
+
+std::string HandleAnnotationsGet(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<AnnotationsOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address] { outcome->ok = GetAnnotations(address, outcome->annotations, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["address"] = address;
+    result["label"] = outcome->annotations.label;
+    result["comment"] = outcome->annotations.comment;
+    result["bookmark"] = outcome->annotations.bookmark;
+    return BuildOkResponse(id, result);
+}
+
+struct AnnotationsSetOutcome
+{
+    bool ok = false;
+    std::string error;
+};
+
+std::string HandleAnnotationsSet(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    const bool hasLabel = params.is_object() && params.contains("label");
+    const bool hasComment = params.is_object() && params.contains("comment");
+    const bool hasBookmark = params.is_object() && params.contains("bookmark");
+    if (!hasLabel && !hasComment && !hasBookmark)
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument,
+            "At least one of \"label\", \"comment\", \"bookmark\" must be provided");
+
+    std::string label;
+    if (hasLabel && !GetOptionalStringParam(params, "label", "", label, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    std::string comment;
+    if (hasComment && !GetOptionalStringParam(params, "comment", "", comment, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    bool bookmark = false;
+    if (hasBookmark && !GetOptionalBoolParam(params, "bookmark", false, bookmark, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<AnnotationsSetOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address, hasLabel, label, hasComment, comment, hasBookmark, bookmark]
+        {
+            outcome->ok = true;
+            if (hasLabel && outcome->ok)
+                outcome->ok = SetLabel(address, label, outcome->error);
+            if (hasComment && outcome->ok)
+                outcome->ok = SetComment(address, comment, outcome->error);
+            if (hasBookmark && outcome->ok)
+                outcome->ok = SetBookmark(address, bookmark, outcome->error);
+        },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    // Report what was applied, and whether an empty label/comment cleared it
+    // rather than set it — see the comment on SetLabel/SetComment in
+    // debugger.h for why an empty text means "clear".
+    nlohmann::json result;
+    result["address"] = address;
+    if (hasLabel)
+        result["label"] = label.empty() ? "cleared" : "set";
+    if (hasComment)
+        result["comment"] = comment.empty() ? "cleared" : "set";
+    if (hasBookmark)
+        result["bookmark"] = bookmark;
+    return BuildOkResponse(id, result);
+}
+
 nlohmann::json CommandResultToJson(const CommandResult& result)
 {
     nlohmann::json out;
@@ -1944,6 +2132,12 @@ std::string McpService::HandleRequest(const std::string& request)
         return HandleCoverageDisable(worker_, id, params);
     if (method == "coverage.read")
         return HandleCoverageRead(worker_, id, params);
+    if (method == "symbols.list")
+        return HandleSymbolsList(worker_, id, params);
+    if (method == "annotations.get")
+        return HandleAnnotationsGet(worker_, id, params);
+    if (method == "annotations.set")
+        return HandleAnnotationsSet(worker_, id, params);
 
     return BuildErrorResponse(id, ipc::ErrorCode::UnknownMethod, "Unknown method: " + method);
 }
