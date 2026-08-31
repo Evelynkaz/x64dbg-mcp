@@ -14,6 +14,10 @@ x64dbg_plugin(x64dbg-mcp
     src/plugin/pluginmain.cpp
     src/plugin/plugin.h
     src/plugin/plugin.cpp
+    src/plugin/debugger.h
+    src/plugin/debugger.cpp
+    src/plugin/service.h
+    src/plugin/service.cpp
 )
 
 # Версия плагина выводится из версии проекта — единый источник истины.
@@ -43,7 +47,7 @@ add_library(x64dbg-mcp-plugin-core STATIC
 )
 target_include_directories(x64dbg-mcp-plugin-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-target_link_libraries(x64dbg-mcp PRIVATE x64dbg-mcp-plugin-core)
+target_link_libraries(x64dbg-mcp PRIVATE x64dbg-mcp-plugin-core nlohmann_json)
 
 # Общий код моста и плагина: формат обмена, разбор кадров.
 # Не зависит ни от Windows API, ни от SDK x64dbg — поэтому тестируется отдельно.
@@ -61,6 +65,9 @@ target_link_libraries(x64dbg-mcp-common PUBLIC nlohmann_json)
 # Advapi32: ConvertStringSecurityDescriptorToSecurityDescriptorA в pipe_server.cpp
 # (явные права доступа к именованному каналу).
 target_link_libraries(x64dbg-mcp-common PRIVATE Advapi32)
+
+# service.cpp собирает воедино очередь задач, канал и API x64dbg.
+target_link_libraries(x64dbg-mcp PRIVATE x64dbg-mcp-common)
 
 # Ядро MCP-сервера. Не содержит ввода-вывода, поэтому тестируется отдельно.
 add_library(x64dbg-mcp-bridge-core STATIC
