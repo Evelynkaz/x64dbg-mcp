@@ -10,37 +10,37 @@
 namespace x64dbg_mcp::bridge
 {
 
-// Обёртка над PipeClient: превращает вызовы методов плагина в удобный
-// интерфейс "запрос-ответ" (Call), скрывая детали именованного канала и
-// рукопожатия протокола. Живёт в процессе моста весь срок его работы.
+// Wraps PipeClient: turns calls to plugin methods into a convenient
+// request-response interface (Call), hiding the details of the named pipe
+// and the protocol handshake. Lives in the bridge process for its entire lifetime.
 class PluginLink
 {
 public:
     explicit PluginLink(std::string pipeName, int connectTimeoutMs = 3000, int requestTimeoutMs = 15000);
 
-    // Выполняет вызов метода плагина. Подключается при первом обращении —
-    // мост запускается раньше, чем пользователь откроет x64dbg, и не должен
-    // падать из-за этого (см. .cpp). Наружу не выходит ничего, кроме
-    // ToolError с английским текстом, пригодным для показа модели.
+    // Performs a call to a plugin method. Connects on first use — the
+    // bridge starts before the user opens x64dbg, and must not fail because
+    // of that (see the .cpp). Nothing escapes outward except ToolError with
+    // English text suitable for showing to the model.
     nlohmann::json Call(const std::string& method, const nlohmann::json& params);
 
-    // Проверяет доступность плагина, не бросая исключений.
+    // Checks whether the plugin is available, without throwing.
     bool IsAvailable();
 
     std::string PipeName() const;
 
 private:
-    // Отправляет один запрос по уже установленному (или только что
-    // установленному) соединению. Возвращает false при сбое транспорта —
-    // тогда Call() решает, стоит ли переподключаться и повторять.
+    // Sends a single request over the already established (or just
+    // established) connection. Returns false on a transport failure — then
+    // Call() decides whether to reconnect and retry.
     bool SendLocked(const std::string& method, const nlohmann::json& params, std::string& response);
 
-    // Разбирает и проверяет ответ плагина; бросает ToolError на любое
-    // несоответствие протоколу или на ошибку от самого плагина (передавая
-    // её текст как есть, ничего не выдумывая).
+    // Parses and validates the plugin's response; throws ToolError on any
+    // protocol mismatch or on an error from the plugin itself (passing its
+    // text through as-is, without inventing anything).
     nlohmann::json ParseResponse(const std::string& method, const std::string& response) const;
 
-    // Формирует сообщение об ошибке транспорта на основе LastError() клиента.
+    // Builds a transport error message based on the client's LastError().
     std::string TransportErrorMessage(const std::string& method) const;
 
     std::string pipeName_;

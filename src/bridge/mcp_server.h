@@ -9,26 +9,26 @@
 namespace x64dbg_mcp::bridge
 {
 
-// Самая новая ревизия протокола, поддерживаемая современной (stateless) моделью.
+// The newest protocol revision supported by the modern (stateless) model.
 constexpr const char* kModernVersion = "2026-07-28";
 
-// Версии устаревшей модели, принимаемые на рукопожатии initialize, от новой
-// к старой. Первый элемент — версия, которую сервер называет своей, если
-// клиент прислал версию не из этого списка.
+// Legacy model versions accepted during the initialize handshake, from
+// newest to oldest. The first element is the version the server calls its
+// own if the client sent a version not in this list.
 constexpr const char* kLegacyVersions[] = { "2025-11-25", "2025-06-18", "2025-03-26" };
 
-// Ядро протокола MCP: разбор и обработка одного сообщения. Не выполняет
-// ввода-вывода, поэтому полностью покрывается юнит-тестами без запуска
-// настоящего транспорта.
+// The core of the MCP protocol: parsing and handling a single message. Does
+// no I/O, so it is fully covered by unit tests without running a real
+// transport.
 class McpServer
 {
 public:
     explicit McpServer(ToolRegistry registry);
 
-    // Обрабатывает одно входящее сообщение (одну строку JSON). Возвращает
-    // строку ответа либо std::nullopt, если отвечать не нужно (уведомления
-    // ответа не требуют). Никогда не бросает исключений: любая внутренняя
-    // ошибка превращается в корректный ответ JSON-RPC.
+    // Handles one incoming message (one line of JSON). Returns a response
+    // string, or std::nullopt if no reply is needed (notifications require
+    // no response). Never throws: any internal error is turned into a valid
+    // JSON-RPC response.
     std::optional<std::string> HandleMessage(const std::string& line);
 
 private:

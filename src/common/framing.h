@@ -6,67 +6,68 @@
 namespace x64dbg_mcp
 {
 
-// Длина префикса кадра: 4 байта little-endian длины полезной нагрузки.
+// Frame prefix length: a 4-byte little-endian length of the payload.
 constexpr size_t kFrameHeaderSize = 4;
 
-// Предел на одно сообщение. Нужен, чтобы повреждённый или враждебный
-// префикс не заставил выделить гигабайты памяти.
+// Limit on a single message. Needed so that a corrupted or hostile
+// prefix can't force allocation of gigabytes of memory.
 constexpr size_t kMaxFrameSize = 64u * 1024u * 1024u;
 
-// Порог, ниже которого сжимать буфер невыгодно — он тут же вырастет обратно.
+// Threshold below which shrinking the buffer isn't worth it — it would just grow back right away.
 constexpr size_t kBufferShrinkThreshold = 64u * 1024u;
 
-// Кодирует полезную нагрузку в кадр: 4 байта длины (little-endian) + сами данные.
-// Возвращает false, если payload превышает kMaxFrameSize.
+// Encodes the payload into a frame: a 4-byte little-endian length followed by the data itself.
+// Returns false if payload exceeds kMaxFrameSize.
 bool EncodeFrame(const std::string& payload, std::string& out);
 
-// Потоковый разборщик кадров. Накапливает произвольные куски байтов
-// и отдаёт готовые сообщения по мере их поступления.
+// A streaming frame parser. Accumulates arbitrary chunks of bytes
+// and yields complete messages as they arrive.
 class FrameReader
 {
 public:
     enum class Status { Ok, Overflow };
 
-    // Добавляет очередную порцию принятых байтов во внутренний буфер.
-    // Возвращает Overflow в трёх случаях: объявленная длина кадра превышает
-    // kMaxFrameSize; выделение памяти под буфер не удалось (std::bad_alloc);
-    // разборщик уже находится в состоянии отказа после одного из предыдущих
-    // случаев. Во всех трёх — дальнейший разбор невозможен, соединение надо
-    // закрыть; не считай Overflow безусловным признаком враждебного пира.
+    // Appends another chunk of received bytes to the internal buffer.
+    // Returns Overflow in three cases: the declared frame length exceeds
+    // kMaxFrameSize; the buffer allocation failed (std::bad_alloc);
+    // the parser is already in a failed state from one of the previous
+    // cases. In all three, further parsing is impossible and the connection
+    // must be closed; don't treat Overflow as unconditional proof of a hostile peer.
     Status Feed(const char* data, size_t size);
 
-    // Извлекает следующий полный кадр. Возвращает false, если целого кадра ещё нет.
+    // Extracts the next complete frame. Returns false if a full frame isn't available yet.
     bool Next(std::string& payload);
 
-    // Разборщик перешёл в необратимо испорченное состояние.
+    // The parser has entered an irrecoverably broken state.
     //
-    // Намеренная потеря кадров: если Feed обнаруживает недопустимый заголовок
-    // в хвосте буфера, разборщик уходит в отказ, и корректные кадры, уже
-    // лежащие в буфере ПЕРЕД битым заголовком, наружу больше не выдаются —
-    // они молча теряются. Это осознанный выбор, а не недосмотр: недопустимый
-    // заголовок означает, что поток рассинхронизирован либо пир неисправен.
-    // Доверять содержимому такого потока нельзя, включая кадры, принятые
-    // до обнаружения — рассинхронизация могла начаться раньше, и "корректный"
-    // кадр перед битым заголовком мог быть разобран по случайно совпавшим
-    // байтам. Соединение в любом случае подлежит закрытию, поэтому доставлять
-    // по нему ответ бессмысленно. Отказ целиком безопаснее частичной
-    // обработки данных с нарушенной целостностью.
+    // Intentional frame loss: if Feed finds an invalid header near the tail
+    // of the buffer, the parser goes into a failed state, and correct frames
+    // already sitting in the buffer BEFORE the bad header are no longer
+    // handed out — they are silently dropped. This is a deliberate choice,
+    // not an oversight: an invalid header means the stream has desynced or
+    // the peer is broken. The contents of such a stream can't be trusted,
+    // including frames received before the bad header was found — the
+    // desync could have started earlier, and a "correct" frame in front of
+    // the bad header might have been parsed from a coincidental byte match.
+    // The connection has to be closed either way, so delivering a response
+    // over it is pointless. Failing outright is safer than partially
+    // processing data whose integrity is already compromised.
     bool Failed() const;
 
-    // Сколько байт сейчас лежит в буфере (для диагностики и тестов).
+    // How many bytes currently sit in the buffer (for diagnostics and tests).
     size_t Buffered() const;
 
-    // Текущая ёмкость внутреннего буфера. Нужна, чтобы тесты могли проверить
-    // возврат памяти после обработки крупного кадра — снаружи это иначе не видно.
+    // Current capacity of the internal buffer. Needed so tests can verify
+    // memory is released after processing a large frame — otherwise there's no way to see that from outside.
     size_t Capacity() const;
 
 private:
     std::string buffer_;
     bool failed_ = false;
-    // Граница в buffer_, до которой заголовки кадров уже проверены на
-    // соответствие kMaxFrameSize. Позволяет Feed не пересканировать буфер
-    // с начала при каждом вызове — иначе поток мелких сообщений даёт
-    // квадратичную сложность.
+    // Boundary in buffer_ up to which frame headers have already been checked
+    // against kMaxFrameSize. Lets Feed avoid rescanning the buffer from the
+    // start on every call — otherwise a stream of small messages would give
+    // quadratic complexity.
     size_t scanOffset_ = 0;
 };
 

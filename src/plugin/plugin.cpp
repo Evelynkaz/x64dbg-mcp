@@ -1,7 +1,7 @@
 #include "plugin.h"
 #include "plugin/service.h"
 
-// Инициализация плагина: журналирование факта загрузки и запуск сервиса MCP.
+// Plugin initialization: log the load and start the MCP service.
 bool pluginInit(PLUG_INITSTRUCT* initStruct)
 {
 #ifdef _WIN64
@@ -11,8 +11,8 @@ bool pluginInit(PLUG_INITSTRUCT* initStruct)
 #endif
     dprintf("plugin loaded (version %s, %s)\n", PLUGIN_VERSION_STR, arch);
 
-    // Неудачный запуск сервиса не должен мешать загрузке плагина — плагин
-    // без работающего сервера всё же лучше, чем отказ загрузки целиком.
+    // A failed service start must not block the plugin from loading — a plugin
+    // without a working server is still better than failing the whole load.
     if (x64dbg_mcp::plugin::McpService::Instance().Start())
     {
         x64dbg_mcp::plugin::RegisterDebugCallbacks(initStruct->pluginHandle);
@@ -26,14 +26,14 @@ bool pluginInit(PLUG_INITSTRUCT* initStruct)
     return true;
 }
 
-// Настройка GUI. Выполняется в потоке GUI.
+// GUI setup. Runs on the GUI thread.
 void pluginSetup()
 {
     dputs("plugin setup done");
 }
 
-// Выгрузка плагина. Выполняется НЕ в потоке GUI — здесь нужно дождаться
-// остановки рабочих потоков плагина.
+// Plugin unload. Does NOT run on the GUI thread — here we need to wait for
+// the plugin's worker threads to stop.
 void pluginStop()
 {
     x64dbg_mcp::plugin::UnregisterDebugCallbacks(pluginHandle);

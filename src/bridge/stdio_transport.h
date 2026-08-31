@@ -5,8 +5,8 @@
 namespace x64dbg_mcp::bridge
 {
 
-// Читает строки из stdin и передаёт их серверу, ответы пишет в stdout.
-// Возвращается, когда stdin закрыт (EOF) — это штатный сигнал завершения.
+// Reads lines from stdin and passes them to the server, writes responses to stdout.
+// Returns when stdin is closed (EOF) — that is the normal shutdown signal.
 void RunStdioLoop(McpServer& server);
 
 } // namespace x64dbg_mcp::bridge

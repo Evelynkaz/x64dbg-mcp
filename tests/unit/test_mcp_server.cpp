@@ -24,8 +24,8 @@ using nlohmann::json;
 namespace
 {
 
-// Уникальное имя канала на каждый тест, чтобы прогоны с фиктивным плагином
-// не мешали друг другу (в том числе повторные прогоны набора тестов подряд).
+// A unique pipe name per test so runs with the fake plugin don't interfere
+// with each other (including repeated back-to-back runs of the test suite).
 std::string MakeMcpTestPipeName()
 {
     static std::atomic<int> counter{0};
@@ -33,8 +33,8 @@ std::string MakeMcpTestPipeName()
            "-" + std::to_string(++counter);
 }
 
-// Свежий сервер на каждый тест: HandleMessage не хранит состояния между
-// вызовами, но так проще читать сценарии по отдельности.
+// A fresh server per test: HandleMessage keeps no state between calls,
+// but it's easier to read scenarios in isolation this way.
 McpServer MakeServer()
 {
     return McpServer(CreateDefaultRegistry());
@@ -45,7 +45,7 @@ json Parse(const std::string& response)
     return json::parse(response);
 }
 
-// Проверяет, что json-массив version-строк содержит указанное значение.
+// Checks that the json array of version strings contains the given value.
 bool Contains(const json& array, const std::string& value)
 {
     for (const auto& item : array)
@@ -58,9 +58,9 @@ bool Contains(const json& array, const std::string& value)
 
 } // namespace
 
-// ---- Устаревшая модель (рукопожатие initialize) ----
+// ---- Legacy model (initialize handshake) ----
 
-TEST_CASE("mcp: initialize с известной версией возвращает её эхом") {
+TEST_CASE("mcp: initialize with a known version echoes it back") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":1,"method":"initialize",
         "params":{"protocolVersion":"2025-11-25","capabilities":{}}})";
@@ -74,7 +74,7 @@ TEST_CASE("mcp: initialize с известной версией возвраща
     CHECK(msg["result"]["serverInfo"].contains("name"));
 }
 
-TEST_CASE("mcp: initialize с неизвестной версией не рвёт рукопожатие, отвечает своей версией") {
+TEST_CASE("mcp: initialize with an unknown version does not break the handshake, replies with its own version") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":1,"method":"initialize",
         "params":{"protocolVersion":"1900-01-01","capabilities":{}}})";
@@ -84,18 +84,18 @@ TEST_CASE("mcp: initialize с неизвестной версией не рвё�
 
     const json msg = Parse(*response);
     REQUIRE(msg.contains("result"));
-    // Сервер не должен вернуть присланную клиентом версию как есть.
+    // The server must not echo back the client-supplied version as is.
     CHECK(msg["result"]["protocolVersion"] != "1900-01-01");
 }
 
-TEST_CASE("mcp: notifications/initialized не требует ответа") {
+TEST_CASE("mcp: notifications/initialized requires no response") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","method":"notifications/initialized"})";
 
     CHECK_FALSE(server.HandleMessage(request).has_value());
 }
 
-TEST_CASE("mcp: tools/list в устаревшей модели возвращает непустой список инструментов") {
+TEST_CASE("mcp: tools/list in the legacy model returns a non-empty tool list") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})";
 
@@ -112,7 +112,7 @@ TEST_CASE("mcp: tools/list в устаревшей модели возвраща
     CHECK(first.contains("inputSchema"));
 }
 
-TEST_CASE("mcp: tools/call для server_status возвращает content и structuredContent") {
+TEST_CASE("mcp: tools/call for server_status returns content and structuredContent") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":3,"method":"tools/call",
         "params":{"name":"server_status","arguments":{}}})";
@@ -123,13 +123,13 @@ TEST_CASE("mcp: tools/call для server_status возвращает content и 
     const json msg = Parse(*response);
     REQUIRE(msg["result"]["content"].is_array());
     CHECK(msg["result"]["structuredContent"].contains("server_version"));
-    // Спецификация MCP показывает isError: false в примерах успешного результата.
+    // The MCP spec shows isError: false in examples of a successful result.
     CHECK(msg["result"]["isError"] == false);
 }
 
-// server_status задаёт человекочитаемый text, поэтому content[0].text должен
-// быть читаемой строкой, а не сериализованным structuredContent.
-TEST_CASE("mcp: content[0].text инструмента с заданным text не является JSON") {
+// server_status sets a human-readable text, so content[0].text must be a
+// readable string, not a serialized structuredContent.
+TEST_CASE("mcp: content[0].text of a tool with an explicit text is not JSON") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":30,"method":"tools/call",
         "params":{"name":"server_status","arguments":{}}})";
@@ -143,7 +143,7 @@ TEST_CASE("mcp: content[0].text инструмента с заданным text 
     CHECK(text[0] != '{');
 }
 
-TEST_CASE("mcp: structuredContent read_memory и disassemble не содержит поле text верхнего уровня") {
+TEST_CASE("mcp: structuredContent of read_memory and disassemble has no top-level text field") {
     const std::string pipeName = MakeMcpTestPipeName();
 
     PipeServer pipeServer;
@@ -182,7 +182,7 @@ TEST_CASE("mcp: structuredContent read_memory и disassemble не содержи
     pipeServer.Stop();
 }
 
-TEST_CASE("mcp: инструмент без заданного text получает сериализацию structuredContent с отступами") {
+TEST_CASE("mcp: a tool without explicit text gets an indented structuredContent serialization") {
     ToolRegistry registry;
     Tool tool;
     tool.name = "fake_tool";
@@ -213,11 +213,11 @@ TEST_CASE("mcp: инструмент без заданного text получа
     CHECK(text.find('\n') != std::string::npos);
 }
 
-// Спецификация MCP (раздел Error Handling) относит неизвестное имя
-// инструмента к Protocol Errors: "Unknown tool, Malformed requests, Server
-// errors ... returned as standard JSON-RPC errors". Ранее сервер возвращал
-// это как результат с isError: true, что противоречит спецификации.
-TEST_CASE("mcp: tools/call для несуществующего инструмента даёт ошибку JSON-RPC -32602") {
+// The MCP spec (Error Handling section) classifies an unknown tool name as
+// a Protocol Error: "Unknown tool, Malformed requests, Server errors ...
+// returned as standard JSON-RPC errors". Previously the server returned this
+// as a result with isError: true, which contradicts the spec.
+TEST_CASE("mcp: tools/call for a nonexistent tool gives JSON-RPC error -32602") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":4,"method":"tools/call",
         "params":{"name":"no_such_tool","arguments":{}}})";
@@ -230,9 +230,9 @@ TEST_CASE("mcp: tools/call для несуществующего инструм�
     CHECK(msg["error"]["code"] == -32602);
 }
 
-// ---- Современная (stateless) модель ----
+// ---- Modern (stateless) model ----
 
-TEST_CASE("mcp: server/discover с корректным _meta возвращает полное описание сервера") {
+TEST_CASE("mcp: server/discover with valid _meta returns the full server description") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":"d1","method":"server/discover",
         "params":{"_meta":{
@@ -248,7 +248,7 @@ TEST_CASE("mcp: server/discover с корректным _meta возвращае
     CHECK(msg["result"]["_meta"].contains("io.modelcontextprotocol/serverInfo"));
 }
 
-TEST_CASE("mcp: запрос современной модели без protocolVersion в _meta -> ошибка -32602") {
+TEST_CASE("mcp: a modern-model request without protocolVersion in _meta -> error -32602") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":5,"method":"server/discover",
         "params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}})";
@@ -260,7 +260,7 @@ TEST_CASE("mcp: запрос современной модели без protocol
     CHECK(msg["error"]["code"] == -32602);
 }
 
-TEST_CASE("mcp: запрос современной модели без clientCapabilities в _meta -> ошибка -32602") {
+TEST_CASE("mcp: a modern-model request without clientCapabilities in _meta -> error -32602") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":6,"method":"server/discover",
         "params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}})";
@@ -272,7 +272,7 @@ TEST_CASE("mcp: запрос современной модели без clientCa
     CHECK(msg["error"]["code"] == -32602);
 }
 
-TEST_CASE("mcp: неподдерживаемая версия современного протокола -> ошибка -32022") {
+TEST_CASE("mcp: unsupported modern protocol version -> error -32022") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":7,"method":"server/discover",
         "params":{"_meta":{
@@ -285,14 +285,14 @@ TEST_CASE("mcp: неподдерживаемая версия современн
     const json msg = Parse(*response);
     CHECK(msg["error"]["code"] == -32022);
     CHECK(Contains(msg["error"]["data"]["supported"], kModernVersion));
-    // data.supported должен содержать не только современную версию, но и все
-    // устаревшие: иначе клиент не поймёт, что может откатиться на initialize.
+    // data.supported must contain not only the modern version but all the
+    // legacy ones too: otherwise the client won't know it can fall back to initialize.
     for (const char* legacy : kLegacyVersions)
         CHECK(Contains(msg["error"]["data"]["supported"], legacy));
     CHECK(msg["error"]["data"]["requested"] == "1900-01-01");
 }
 
-TEST_CASE("mcp: tools/list в современной модели содержит resultType complete") {
+TEST_CASE("mcp: tools/list in the modern model contains resultType complete") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":8,"method":"tools/list",
         "params":{"_meta":{
@@ -307,15 +307,15 @@ TEST_CASE("mcp: tools/list в современной модели содержи
     REQUIRE_FALSE(msg["result"]["tools"].empty());
 }
 
-// ---- Регрессия: _meta с клиентскими ключами не должен переключать модель ----
+// ---- Regression: _meta with client-side keys must not switch the model ----
 
-TEST_CASE("mcp: реальный tools/call от Claude Code 2.1.251 с _meta без зарезервированных ключей проходит") {
-    // Дословное сообщение, перехваченное от Claude Code 2.1.251 (устаревшее
-    // рукопожатие initialize, версия 2025-11-25). Прежняя реализация видела
-    // непустой _meta, считала это заявкой на современную модель, требовала
-    // io.modelcontextprotocol/protocolVersion, не находила его и отвечала
-    // -32602 на КАЖДЫЙ вызов инструмента — сервер был неработоспособен с
-    // этим клиентом.
+TEST_CASE("mcp: a real tools/call from Claude Code 2.1.251 with _meta lacking reserved keys succeeds") {
+    // The verbatim message captured from Claude Code 2.1.251 (legacy
+    // initialize handshake, version 2025-11-25). The previous implementation
+    // saw a non-empty _meta, treated it as opting into the modern model,
+    // required io.modelcontextprotocol/protocolVersion, didn't find it, and
+    // responded -32602 on EVERY tool call — the server was unusable with
+    // this client.
     McpServer server = MakeServer();
     const std::string request =
         R"({"method":"tools/call","params":{"name":"server_status","arguments":{},)"
@@ -330,7 +330,7 @@ TEST_CASE("mcp: реальный tools/call от Claude Code 2.1.251 с _meta б
     CHECK(msg["result"]["structuredContent"].contains("server_version"));
 }
 
-TEST_CASE("mcp: tools/list с клиентским progressToken в _meta обрабатывается по устаревшей модели") {
+TEST_CASE("mcp: tools/list with a client progressToken in _meta is handled by the legacy model") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":10,"method":"tools/list",
         "params":{"_meta":{"progressToken":5}}})";
@@ -342,11 +342,11 @@ TEST_CASE("mcp: tools/list с клиентским progressToken в _meta обр
     CHECK_FALSE(msg.contains("error"));
     REQUIRE(msg["result"]["tools"].is_array());
     REQUIRE_FALSE(msg["result"]["tools"].empty());
-    // Устаревшая модель не оборачивает результат в конверт современной.
+    // The legacy model does not wrap the result in the modern envelope.
     CHECK_FALSE(msg["result"].contains("resultType"));
 }
 
-TEST_CASE("mcp: зарезервированный clientCapabilities без protocolVersion распознаётся как современная модель") {
+TEST_CASE("mcp: a reserved clientCapabilities without protocolVersion is recognized as the modern model") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":11,"method":"tools/list",
         "params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}})";
@@ -358,7 +358,7 @@ TEST_CASE("mcp: зарезервированный clientCapabilities без pro
     CHECK(msg["error"]["code"] == -32602);
 }
 
-TEST_CASE("mcp: _meta с клиентскими и зарезервированными ключами одновременно обрабатывается по современной модели") {
+TEST_CASE("mcp: _meta with both client and reserved keys together is handled by the modern model") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":12,"method":"tools/list",
         "params":{"_meta":{
@@ -374,7 +374,7 @@ TEST_CASE("mcp: _meta с клиентскими и зарезервирован�
     CHECK(msg["result"]["resultType"] == "complete");
 }
 
-TEST_CASE("mcp: server/discover без _meta всё равно современная модель, ошибка -32602, а не -32601") {
+TEST_CASE("mcp: server/discover without _meta is still the modern model, error -32602, not -32601") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":13,"method":"server/discover","params":{}})";
 
@@ -386,11 +386,11 @@ TEST_CASE("mcp: server/discover без _meta всё равно современ�
     CHECK(msg["error"]["code"] == -32602);
 }
 
-// ---- Общее ----
+// ---- General ----
 
-TEST_CASE("mcp: битый JSON -> ошибка -32700, id равен null") {
+TEST_CASE("mcp: malformed JSON -> error -32700, id is null") {
     McpServer server = MakeServer();
-    auto response = server.HandleMessage("{не json");
+    auto response = server.HandleMessage("{not json");
     REQUIRE(response.has_value());
 
     const json msg = Parse(*response);
@@ -398,7 +398,7 @@ TEST_CASE("mcp: битый JSON -> ошибка -32700, id равен null") {
     CHECK(msg["id"].is_null());
 }
 
-TEST_CASE("mcp: сообщение-массив вместо объекта -> ошибка -32600") {
+TEST_CASE("mcp: a message that is an array instead of an object -> error -32600") {
     McpServer server = MakeServer();
     auto response = server.HandleMessage("[1,2,3]");
     REQUIRE(response.has_value());
@@ -407,7 +407,7 @@ TEST_CASE("mcp: сообщение-массив вместо объекта -> �
     CHECK(msg["error"]["code"] == -32600);
 }
 
-TEST_CASE("mcp: неизвестный метод в устаревшей модели -> ошибка -32601") {
+TEST_CASE("mcp: an unknown method in the legacy model -> error -32601") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":9,"method":"no/such/method","params":{}})";
 
@@ -418,18 +418,18 @@ TEST_CASE("mcp: неизвестный метод в устаревшей мод
     CHECK(msg["error"]["code"] == -32601);
 }
 
-TEST_CASE("mcp: notifications/cancelled не требует ответа") {
+TEST_CASE("mcp: notifications/cancelled requires no response") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}})";
 
     CHECK_FALSE(server.HandleMessage(request).has_value());
 }
 
-TEST_CASE("mcp: ни один ответ не содержит перевода строки") {
-    // Реальный риск: если json::dump() когда-нибудь начнёт печатать
-    // сообщение с отступами (или в код закрадётся ручная конкатенация с
-    // '\n'), одно сообщение MCP разорвётся на две строки и сломает
-    // построчный транспорт stdio.
+TEST_CASE("mcp: no response contains a newline") {
+    // A real risk: if json::dump() ever starts printing the message with
+    // indentation (or manual concatenation with '\n' creeps into the code),
+    // a single MCP message would split into two lines and break the
+    // line-oriented stdio transport.
     McpServer server = MakeServer();
 
     const std::vector<std::string> requests = {
@@ -440,7 +440,7 @@ TEST_CASE("mcp: ни один ответ не содержит перевода 
             "params":{"_meta":{
                 "io.modelcontextprotocol/protocolVersion":"2026-07-28",
                 "io.modelcontextprotocol/clientCapabilities":{}}}})",
-        "{не json"
+        "{not json"
     };
 
     for (const auto& request : requests)
@@ -451,11 +451,11 @@ TEST_CASE("mcp: ни один ответ не содержит перевода 
     }
 }
 
-// ---- Защита от переполнения стека и раздувания памяти на входе ----
+// ---- Protection against stack overflow and memory blowup on input ----
 
-TEST_CASE("mcp: сообщение с 20000 уровней вложенности отбраковывается -32600, процесс не падает") {
-    // Сам факт, что этот тест дошёл до CHECK, уже доказывает отсутствие
-    // падения процесса: рекурсивный разбор такой глубины переполняет стек.
+TEST_CASE("mcp: a message with 20000 levels of nesting is rejected with -32600, the process does not crash") {
+    // The mere fact that this test reaches CHECK already proves the process
+    // didn't crash: recursive parsing of this depth overflows the stack.
     McpServer server = MakeServer();
     const std::string request =
         R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"x":)" +
@@ -468,7 +468,7 @@ TEST_CASE("mcp: сообщение с 20000 уровней вложенност�
     CHECK(msg["error"]["code"] == -32600);
 }
 
-TEST_CASE("mcp: сообщение с допустимой вложенностью (10 уровней) обрабатывается нормально") {
+TEST_CASE("mcp: a message with acceptable nesting (10 levels) is handled normally") {
     McpServer server = MakeServer();
     const std::string request =
         R"({"jsonrpc":"2.0","id":21,"method":"tools/list","params":{"nested":)" +
@@ -482,9 +482,9 @@ TEST_CASE("mcp: сообщение с допустимой вложенност�
     REQUIRE(msg["result"]["tools"].is_array());
 }
 
-TEST_CASE("mcp: сообщение размером больше предела -> ошибка -32600") {
+TEST_CASE("mcp: a message larger than the size limit -> error -32600") {
     McpServer server = MakeServer();
-    // Значение заведомо больше лимита в 8 МиБ, заданного в mcp_server.cpp.
+    // A value knowingly larger than the 8 MiB limit set in mcp_server.cpp.
     const std::string request =
         R"({"jsonrpc":"2.0","id":22,"method":"tools/list","params":{"pad":")" +
         std::string(9u * 1024u * 1024u, 'a') + "\"}}";
@@ -496,9 +496,9 @@ TEST_CASE("mcp: сообщение размером больше предела 
     CHECK(msg["error"]["code"] == -32600);
 }
 
-// ---- Разбор некорректных tools/call как ошибок протокола ----
+// ---- Parsing malformed tools/call as protocol errors ----
 
-TEST_CASE("mcp: tools/call без params.name -> ошибка -32602") {
+TEST_CASE("mcp: tools/call without params.name -> error -32602") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"arguments":{}}})";
 
@@ -509,10 +509,10 @@ TEST_CASE("mcp: tools/call без params.name -> ошибка -32602") {
     CHECK(msg["error"]["code"] == -32602);
 }
 
-TEST_CASE("mcp: tools/call с arguments в виде строки -> ошибка -32602") {
+TEST_CASE("mcp: tools/call with arguments as a string -> error -32602") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":24,"method":"tools/call",
-        "params":{"name":"server_status","arguments":"строка"}})";
+        "params":{"name":"server_status","arguments":"a string"}})";
 
     auto response = server.HandleMessage(request);
     REQUIRE(response.has_value());
@@ -521,9 +521,9 @@ TEST_CASE("mcp: tools/call с arguments в виде строки -> ошибка
     CHECK(msg["error"]["code"] == -32602);
 }
 
-// ---- Тип id запроса ----
+// ---- Request id type ----
 
-TEST_CASE("mcp: id в виде объекта -> ошибка -32600 с id: null") {
+TEST_CASE("mcp: id as an object -> error -32600 with id: null") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":{"a":1},"method":"tools/list","params":{}})";
 
@@ -535,7 +535,7 @@ TEST_CASE("mcp: id в виде объекта -> ошибка -32600 с id: null
     CHECK(msg["id"].is_null());
 }
 
-TEST_CASE("mcp: id в виде строки обрабатывается нормально и возвращается строкой") {
+TEST_CASE("mcp: id as a string is handled normally and returned as a string") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":"req-1","method":"tools/list","params":{}})";
 
@@ -549,7 +549,7 @@ TEST_CASE("mcp: id в виде строки обрабатывается нор�
 
 // ---- ping ----
 
-TEST_CASE("mcp: ping возвращает успешный результат, а не -32601") {
+TEST_CASE("mcp: ping returns a successful result, not -32601") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":25,"method":"ping","params":{}})";
 
@@ -561,14 +561,14 @@ TEST_CASE("mcp: ping возвращает успешный результат, �
     REQUIRE(msg.contains("result"));
 }
 
-// ---- clientCapabilities должен быть объектом ----
+// ---- clientCapabilities must be an object ----
 
-TEST_CASE("mcp: clientCapabilities не объект -> ошибка -32602") {
+TEST_CASE("mcp: clientCapabilities not an object -> error -32602") {
     McpServer server = MakeServer();
     const std::string request = R"({"jsonrpc":"2.0","id":26,"method":"server/discover",
         "params":{"_meta":{
             "io.modelcontextprotocol/protocolVersion":"2026-07-28",
-            "io.modelcontextprotocol/clientCapabilities":"не-объект"}}})";
+            "io.modelcontextprotocol/clientCapabilities":"not-an-object"}}})";
 
     auto response = server.HandleMessage(request);
     REQUIRE(response.has_value());

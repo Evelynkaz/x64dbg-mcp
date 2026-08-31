@@ -16,10 +16,10 @@ bool DebuggerWorker::Start()
 {
     std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
     if (running_.load())
-        return true; // уже запущен — повторный Start безопасен
+        return true; // already running — calling Start again is safe
 
-    // На случай, если предыдущий Stop() не был вызван — приводим очередь
-    // к чистому состоянию перед новым запуском.
+    // In case a previous Stop() was never called — bring the queue back to
+    // a clean state before starting again.
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         queue_.clear();
@@ -45,10 +45,10 @@ void DebuggerWorker::Stop()
     std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
 
     if (std::this_thread::get_id() == workerThreadId_.load())
-        return;  // Stop() из рабочего потока: присоединиться к самому себе невозможно
+        return;  // Stop() from the worker thread: joining itself is impossible
 
     if (!running_.load())
-        return; // не запущен либо уже остановлен — безопасно
+        return; // not running or already stopped — safe to no-op
 
     std::deque<QueueItem> pending;
     {
@@ -58,18 +58,18 @@ void DebuggerWorker::Stop()
     }
     queueCv_.notify_all();
 
-    // Дожидаемся потока без принудительного завершения: TerminateThread мог
-    // бы остановить его посреди вызова API отладчика, оставив процесс в
-    // непредсказуемом состоянии. Задача, которая сейчас исполняется (если
-    // есть), доработает — прерывать её нельзя.
+    // Wait for the thread without force-terminating it: TerminateThread
+    // could stop it in the middle of a debugger API call, leaving the
+    // process in an unpredictable state. Whatever task is currently running
+    // (if any) is allowed to finish — it must not be interrupted.
     if (thread_.joinable())
         thread_.join();
 
     running_ = false;
     workerThreadId_ = std::thread::id{};
 
-    // Задачи, оставшиеся в очереди, никогда не будут исполнены — их
-    // ожидающие получают NotRunning, а не зависают до собственного таймаута.
+    // Tasks left in the queue will never run — their waiters get NotRunning
+    // instead of hanging until their own timeout.
     for (auto& item : pending)
     {
         {
@@ -90,11 +90,11 @@ DebuggerWorker::SubmitResult DebuggerWorker::Submit(Task task, int timeoutMs)
     if (!running_.load())
         return SubmitResult::NotRunning;
 
-    // Вызов Submit из самого рабочего потока привёл бы к взаимной
-    // блокировке: поток ждал бы завершения задачи, которую должен исполнить
-    // он же сам. Это ошибка использования вызывающего кода, а не штатная
-    // ситуация — отклоняем без постановки в очередь отдельным кодом, чтобы
-    // вызывающий мог отличить её от временной перегрузки очереди (Rejected).
+    // Calling Submit from the worker thread itself would deadlock: the
+    // thread would wait for a task to finish that it itself must run. This
+    // is a caller bug, not a normal condition — reject it without queuing,
+    // using a distinct code so the caller can tell it apart from a
+    // transient queue overload (Rejected).
     if (std::this_thread::get_id() == workerThreadId_.load())
         return SubmitResult::SelfSubmit;
 
@@ -117,12 +117,11 @@ DebuggerWorker::SubmitResult DebuggerWorker::Submit(Task task, int timeoutMs)
 
     if (!signalled)
     {
-        // Задача, возможно, ещё не начала выполняться — помечаем её
-        // брошенной, чтобы рабочий поток пропустил её и не выполнил уже
-        // после того, как вызывающему был отдан ответ об истечении
-        // времени. Если задача уже исполняется, это поле ни на что не
-        // повлияет: прервать выполняющуюся задачу нельзя, она может быть
-        // в середине вызова API отладчика.
+        // The task may not have started yet — mark it abandoned so the
+        // worker thread skips it instead of running it after the caller has
+        // already been told the wait timed out. If the task is already
+        // running, this flag has no effect: a running task cannot be
+        // interrupted, it may be in the middle of a debugger API call.
         completion->abandoned = true;
         return SubmitResult::Timeout;
     }
@@ -148,30 +147,30 @@ void DebuggerWorker::Run()
             {
                 if (stopRequested_.load())
                     break;
-                continue; // ложное пробуждение
+                continue; // spurious wakeup
             }
             item = std::move(queue_.front());
             queue_.pop_front();
         }
 
-        // Пропускаем только ещё НЕ начатые задачи, брошенные вызывающим по
-        // таймауту (Submit() успел вернуть Timeout раньше, чем задача
-        // покинула очередь). Уже начатую задачу прерывать нельзя — она
-        // может быть в середине вызова API отладчика.
+        // Only skip tasks that have NOT started yet and were abandoned by
+        // the caller on timeout (Submit() returned Timeout before the task
+        // left the queue). An already-started task cannot be interrupted —
+        // it may be in the middle of a debugger API call.
         {
             std::lock_guard<std::mutex> lock(item.completion->mutex);
             if (item.completion->abandoned)
                 continue;
         }
 
-        // Исключение из задачи не должно ронять рабочий поток — иначе одна
-        // сломанная задача обрывает обслуживание всех последующих.
-        // catch (...) перехватывает только исключения C++ (std::bad_alloc,
-        // std::runtime_error и т. п.). Структурные исключения (SEH),
-        // например обращение по недопустимому адресу внутри API отладчика,
-        // этим не сдерживаются и пройдут мимо этого catch — как и в
-        // src/common/pipe_server.cpp, защита от них должна быть в слое
-        // обёртки над самим API, а не здесь.
+        // An exception from a task must not bring down the worker thread —
+        // otherwise one broken task would stop all subsequent ones from
+        // being served. catch (...) only catches C++ exceptions
+        // (std::bad_alloc, std::runtime_error, etc.). Structured exceptions
+        // (SEH), such as an invalid memory access inside the debugger API,
+        // are not caught by this and will pass right through it — as in
+        // src/common/pipe_server.cpp, guarding against those has to happen
+        // in the wrapper layer over the API itself, not here.
         try
         {
             item.task();

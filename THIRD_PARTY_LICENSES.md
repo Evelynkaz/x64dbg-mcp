@@ -1,13 +1,14 @@
-# Лицензии сторонних компонентов
+# Third-party licenses
 
-Проект x64dbg-mcp распространяется под лицензией MIT (см. файл `LICENSE`) и
-включает перечисленные ниже сторонние компоненты. Их лицензии совместимы с MIT.
-Полный текст каждой лицензии приведён дословно, на языке оригинала (английском).
+The x64dbg-mcp project is distributed under the MIT license (see the `LICENSE`
+file) and includes the third-party components listed below. Their licenses are
+compatible with MIT. The full text of each license is reproduced verbatim, in
+its original language (English).
 
 ## nlohmann/json
 
-- Версия: v3.12.0
-- Лицензия: MIT
+- Version: v3.12.0
+- License: MIT
 - URL: https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp
 
 ```
@@ -36,8 +37,8 @@ SOFTWARE.
 
 ## doctest
 
-- Версия: v2.5.3
-- Лицензия: MIT
+- Version: v2.5.3
+- License: MIT
 - URL: https://raw.githubusercontent.com/doctest/doctest/v2.5.3/doctest/doctest.h
 
 ```
@@ -66,10 +67,10 @@ SOFTWARE.
 
 ## x64dbg/docs
 
-Справочник по командам x64dbg, который будет включён в сервер как ресурс MCP,
-основан на репозитории https://github.com/x64dbg/docs.
+The x64dbg command reference that will be included in the server as an MCP
+resource is based on the repository https://github.com/x64dbg/docs.
 
-- Лицензия: MIT
+- License: MIT
 - Copyright: (c) 2016 x64dbg
 - URL: https://github.com/x64dbg/docs
 

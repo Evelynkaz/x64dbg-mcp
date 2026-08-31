@@ -10,52 +10,53 @@
 namespace x64dbg_mcp
 {
 
-// Клиент именованного канала Windows. Живёт в процессе моста и подключается
-// к серверу, работающему внутри плагина x64dbg.
+// Windows named pipe client. Lives in the bridge process and connects
+// to the server running inside the x64dbg plugin.
 class PipeClient
 {
 public:
-    // protocolMajorOverride / protocolMinorOverride — со значением по
-    // умолчанию (-1) клиент заявляет реальную версию протокола из
-    // ipc_protocol.h. Параметры существуют исключительно для юнит-тестов
-    // рукопожатия версии (см. дефект 3 в ревью): позволяют клиенту заявить
-    // версию, отличную от собственной, не трогая ipc_protocol.h.
+    // protocolMajorOverride / protocolMinorOverride — with the default value
+    // (-1), the client advertises the real protocol version from
+    // ipc_protocol.h. These parameters exist purely for unit tests of the
+    // version handshake (see defect 3 in the review): they let the client
+    // advertise a version different from its own without touching ipc_protocol.h.
     explicit PipeClient(int protocolMajorOverride = -1, int protocolMinorOverride = -1);
     ~PipeClient();
 
     PipeClient(const PipeClient&) = delete;
     PipeClient& operator=(const PipeClient&) = delete;
 
-    // Подключается к каналу. timeoutMs — предел ожидания. Внутри, прозрачно
-    // для вызывающего, выполняет рукопожатие версии протокола: если мажорная
-    // версия сервера отличается от собственной, соединение закрывается и
-    // возвращается false (подробности — в LastError()).
-    // Возвращает false, если канал недоступен (x64dbg не запущен или плагин
-    // не загружен) либо истёк таймаут; подробности — в LastError().
+    // Connects to the pipe. timeoutMs is the wait limit. Internally, transparently
+    // to the caller, performs the protocol version handshake: if the server's
+    // major version differs from its own, the connection is closed and
+    // false is returned (see LastError() for details).
+    // Returns false if the pipe is unavailable (x64dbg isn't running or the
+    // plugin isn't loaded) or the timeout expired; see LastError() for details.
     bool Connect(const std::string& pipeName, int timeoutMs);
 
-    // Разрывает соединение. Не ждёт блокировку, удерживаемую SendRequest на
-    // время текущего запроса — сначала взводит событие прерывания, чтобы
-    // ожидающий ввод-вывод в SendRequest завершился немедленно (см. риск 9
-    // в ревью), и лишь затем закрывает дескрипторы под блокировкой.
+    // Tears down the connection. Does not wait for the lock held by
+    // SendRequest for the duration of the current request — it first signals
+    // the abort event so that pending I/O inside SendRequest completes
+    // immediately (see risk 9 in the review), and only then closes the
+    // handles under the lock.
     void Disconnect();
     bool IsConnected() const;
 
-    // Отправляет запрос и дожидается ответа.
-    // Возвращает false при ошибке связи, разрыве соединения (см. Disconnect)
-    // или истечении таймаута; в этом случае соединение считается непригодным
-    // и закрывается.
+    // Sends a request and waits for the response.
+    // Returns false on a communication error, a dropped connection (see
+    // Disconnect), or a timed-out wait; in that case the connection is
+    // considered unusable and is closed.
     bool SendRequest(const std::string& request, std::string& response, int timeoutMs);
 
-    // Текст последней ошибки — для сообщения пользователю. Всегда на английском.
+    // Text of the last error — for reporting to the user. Always in English.
     std::string LastError() const;
 
 private:
-    // Результат операции ввода-вывода с ожиданием по таймауту.
+    // Result of an I/O operation waited on with a timeout.
     enum class IoResult { Ok, TimedOut, Aborted, Error };
 
-    // Все приватные методы ниже предполагают, что mutex_ уже захвачен
-    // вызывающим публичным методом.
+    // All private methods below assume mutex_ is already held by the
+    // calling public method.
     void ClosePipe();
     void SetError(std::string message);
     bool PerformHandshake(int timeoutMs);
@@ -65,8 +66,8 @@ private:
     bool WriteAll(const std::string& data, unsigned long long deadlineTick);
 
     HANDLE hPipe_ = INVALID_HANDLE_VALUE;
-    // Риск 9: взводится в Disconnect() без захвата mutex_, чтобы прервать
-    // ввод-вывод, ожидающий внутри SendRequest, не дожидаясь его таймаута.
+    // Risk 9: signaled in Disconnect() without holding mutex_, so it can
+    // interrupt I/O waiting inside SendRequest without waiting for its timeout.
     HANDLE abortEvent_ = nullptr;
     mutable std::mutex mutex_;
     std::string lastError_;

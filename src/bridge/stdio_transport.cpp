@@ -16,11 +16,11 @@ namespace x64dbg_mcp::bridge
 void RunStdioLoop(McpServer& server)
 {
 #ifdef _WIN32
-    // По умолчанию поток stdout на Windows открыт в текстовом режиме, в
-    // котором рантайм превращает каждый '\n' в пару CR LF. Протокол требует
-    // ровно один перевод строки на сообщение, поэтому без двоичного режима
-    // ответ будет перенесён построчным парсером клиента как два сообщения
-    // и сломает транспорт.
+    // By default the stdout stream on Windows is opened in text mode, where
+    // the runtime turns every '\n' into a CR LF pair. The protocol requires
+    // exactly one newline per message, so without binary mode the response
+    // would be split by the client's line-based parser into two messages
+    // and break the transport.
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
 
@@ -34,8 +34,8 @@ void RunStdioLoop(McpServer& server)
         if (!response)
             continue;
 
-        // Немедленный сброс буфера обязателен: клиент ждёт ответ на этой же
-        // строке синхронно, буферизация stdout заставила бы его зависнуть.
+        // Flushing the buffer immediately is mandatory: the client waits for
+        // the response synchronously, buffering stdout would make it hang.
         std::cout << *response << "\n";
         std::cout.flush();
     }

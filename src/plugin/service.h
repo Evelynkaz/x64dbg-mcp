@@ -9,8 +9,8 @@
 namespace x64dbg_mcp::plugin
 {
 
-// Синглтон: коллбэки x64dbg — свободные функции без пользовательских данных
-// (см. CBPLUGIN в _plugins.h), им нужна общая точка доступа к состоянию.
+// Singleton: x64dbg callbacks are free functions with no user data (see
+// CBPLUGIN in _plugins.h), so they need a shared access point to the state.
 class McpService
 {
 public:
@@ -19,14 +19,14 @@ public:
     McpService(const McpService&) = delete;
     McpService& operator=(const McpService&) = delete;
 
-    // Запускает рабочий поток и сервер канала. Возвращает false при неудаче.
+    // Starts the worker thread and the pipe server. Returns false on failure.
     bool Start();
-    // Останавливает всё в безопасном порядке (см. .cpp).
+    // Stops everything in a safe order (see the .cpp).
     void Stop();
 
     DebugStateTracker& Tracker();
 
-    // Имя канала, на котором работает сервер (для сообщения в лог).
+    // The name of the pipe the server is listening on (for logging).
     std::string PipeName() const;
 
 private:
@@ -40,11 +40,11 @@ private:
     PipeServer pipeServer_;
 };
 
-// Регистрирует коллбэки состояния отладки, обновляющие McpService::Instance().Tracker().
-// Вызывать один раз при инициализации плагина.
+// Registers debug state callbacks that update McpService::Instance().Tracker().
+// Call once during plugin initialization.
 void RegisterDebugCallbacks(int pluginHandle);
 
-// Снимает коллбэки, зарегистрированные RegisterDebugCallbacks. Вызывать при выгрузке.
+// Unregisters the callbacks registered by RegisterDebugCallbacks. Call on unload.
 void UnregisterDebugCallbacks(int pluginHandle);
 
 } // namespace x64dbg_mcp::plugin

@@ -1,19 +1,19 @@
-# Заметка: проверенные сигнатуры x64dbg Plugin SDK
+# Note: verified x64dbg Plugin SDK signatures
 
-Источник: SDK из релиза x64dbg `2026.05.27` (ассет `x64dbg-pluginsdk-cmake.zip`) и клон `https://github.com/x64dbg/x64dbg` (ветка development). `PLUG_SDKVERSION == 1` (из `_plugins.h`).
+Source: SDK from x64dbg release `2026.05.27` (asset `x64dbg-pluginsdk-cmake.zip`) and a clone of `https://github.com/x64dbg/x64dbg` (development branch). `PLUG_SDKVERSION == 1` (from `_plugins.h`).
 
-## Точка входа плагина
+## Plugin entry point
 
-Плагин экспортирует функции инициализации/настройки/выгрузки, структуры описаны в `_plugins.h`:
+The plugin exports init/setup/unload functions; the structures are described in `_plugins.h`:
 
 ```c
 typedef struct { int pluginHandle; int sdkVersion; int pluginVersion; char pluginName[256]; } PLUG_INITSTRUCT;
 typedef struct { HWND hwndDlg; int hMenu; int hMenuDisasm; int hMenuDump; int hMenuStack; int hMenuGraph; int hMenuMemmap; int hMenuSymmod; } PLUG_SETUPSTRUCT;
 ```
 
-`_plugins.h` форсирует выравнивание структур: `#pragma pack(push, 16)` на x64 и `#pragma pack(push, 8)` на x86.
+`_plugins.h` forces structure alignment: `#pragma pack(push, 16)` on x64 and `#pragma pack(push, 8)` on x86.
 
-## Регистрация и логирование (из _plugins.h)
+## Registration and logging (from _plugins.h)
 
 ```c
 void _plugin_registercallback(int pluginHandle, CBTYPE cbType, CBPLUGIN cbPlugin);
@@ -26,9 +26,9 @@ void _plugin_debugpause();
 bool _plugin_waituntilpaused();
 ```
 
-## ВАЖНО: почему _plugin_waituntilpaused() нельзя звать из своего потока
+## IMPORTANT: why _plugin_waituntilpaused() must not be called from our own thread
 
-Реальная реализация (файл `src/dbg/_plugins.cpp`):
+The actual implementation (file `src/dbg/_plugins.cpp`):
 
 ```c
 PLUG_IMPEXP bool _plugin_waituntilpaused()
@@ -42,28 +42,28 @@ PLUG_IMPEXP bool _plugin_waituntilpaused()
 }
 ```
 
-Вывод, который надо зафиксировать: функция крутит цикл с `GuiProcessEvents()` и рассчитана на вызов из потока скриптов/GUI. Вызывать её из произвольного рабочего потока плагина нельзя. Кроме того, у неё нет таймаута — она может висеть вечно. Поэтому ожидание паузы реализуется своими средствами: подписка на коллбэки состояния плюс событие с таймаутом.
+The takeaway to record: this function spins a loop with `GuiProcessEvents()` and is meant to run on the script/GUI thread. It must not be called from an arbitrary plugin worker thread. On top of that, it has no timeout: it can hang forever. So waiting for a pause has to be implemented ourselves, using state-change callbacks plus an event with a timeout.
 
-## Коллбэки состояния отладки (enum CBTYPE из _plugins.h)
+## Debug state callbacks (enum CBTYPE from _plugins.h)
 
-`CB_INITDEBUG` (PLUG_CB_INITDEBUG), `CB_STOPDEBUG` (PLUG_CB_STOPDEBUG), `CB_STOPPINGDEBUG`, `CB_CREATEPROCESS` (PLUG_CB_CREATEPROCESS), `CB_EXITPROCESS`, `CB_CREATETHREAD`, `CB_EXITTHREAD`, `CB_SYSTEMBREAKPOINT`, `CB_LOADDLL`, `CB_UNLOADDLL`, `CB_EXCEPTION`, `CB_BREAKPOINT` (PLUG_CB_BREAKPOINT, поле `BRIDGEBP* breakpoint`), `CB_PAUSEDEBUG`, `CB_RESUMEDEBUG`, `CB_STEPPED`, `CB_ATTACH`, `CB_DETACH`, `CB_DEBUGEVENT`.
+`CB_INITDEBUG` (PLUG_CB_INITDEBUG), `CB_STOPDEBUG` (PLUG_CB_STOPDEBUG), `CB_STOPPINGDEBUG`, `CB_CREATEPROCESS` (PLUG_CB_CREATEPROCESS), `CB_EXITPROCESS`, `CB_CREATETHREAD`, `CB_EXITTHREAD`, `CB_SYSTEMBREAKPOINT`, `CB_LOADDLL`, `CB_UNLOADDLL`, `CB_EXCEPTION`, `CB_BREAKPOINT` (PLUG_CB_BREAKPOINT, field `BRIDGEBP* breakpoint`), `CB_PAUSEDEBUG`, `CB_RESUMEDEBUG`, `CB_STEPPED`, `CB_ATTACH`, `CB_DETACH`, `CB_DEBUGEVENT`.
 
-Именно `CB_PAUSEDEBUG`, `CB_RESUMEDEBUG`, `CB_STEPPED`, `CB_BREAKPOINT`, `CB_INITDEBUG`, `CB_STOPDEBUG`, `CB_CREATEPROCESS`, `CB_EXITPROCESS` используются для отслеживания состояния.
+`CB_PAUSEDEBUG`, `CB_RESUMEDEBUG`, `CB_STEPPED`, `CB_BREAKPOINT`, `CB_INITDEBUG`, `CB_STOPDEBUG`, `CB_CREATEPROCESS`, `CB_EXITPROCESS` are the ones actually used for state tracking.
 
-## Выполнение команд (из bridgemain.h)
+## Executing commands (from bridgemain.h)
 
 ```c
-bool DbgCmdExec(const char* cmd);        // асинхронно
-bool DbgCmdExecDirect(const char* cmd);  // синхронно, в вызывающем потоке
+bool DbgCmdExec(const char* cmd);        // asynchronous
+bool DbgCmdExecDirect(const char* cmd);  // synchronous, on the calling thread
 ```
 
-Проверенная семантика:
-- `DbgCmdExec` реализован как `MsgSend(gMsgQueue, 0, (duint)newcmd, 0)` (файл `src/dbg/x64dbg.cpp`) — команда ставится в штатную очередь и исполняется командным потоком x64dbg. Возвращаемое значение говорит лишь о постановке в очередь, не о результате команды.
-- `DbgCmdExecDirect` вызывает `cmddirectexec(cmd)` (файл `src/dbg/command.cpp`) — команда разбирается и исполняется синхронно в потоке вызывающего; возвращает результат выполнения.
+Verified semantics:
+- `DbgCmdExec` is implemented as `MsgSend(gMsgQueue, 0, (duint)newcmd, 0)` (file `src/dbg/x64dbg.cpp`): the command is placed on x64dbg's regular queue and executed by the command thread. The return value only indicates that it was queued, not the command's result.
+- `DbgCmdExecDirect` calls `cmddirectexec(cmd)` (file `src/dbg/command.cpp`): the command is parsed and executed synchronously on the calling thread; it returns the execution result.
 
-Вывод для проекта: команды, меняющие состояние выполнения (run, step, stop), отправляются через `DbgCmdExec`, а факт остановки ожидается через собственное событие; `DbgCmdExecDirect` применяется там, где нужен немедленный результат и команда не переводит отладчик в состояние выполнения.
+Conclusion for the project: commands that change the execution state (run, step, stop) are sent through `DbgCmdExec`, and the actual halt is awaited via our own event; `DbgCmdExecDirect` is used where an immediate result is needed and the command does not put the debugger into a running state.
 
-## Состояние и осмотр (bridgemain.h)
+## State and inspection (bridgemain.h)
 
 ```c
 bool DbgIsDebugging();
@@ -80,7 +80,7 @@ void DbgGetThreadList(THREADLIST* list);
 bool DbgGetRegDumpEx(REGDUMP_AVX512* regdump, size_t size);
 ```
 
-## Память (bridgemain.h)
+## Memory (bridgemain.h)
 
 ```c
 bool DbgMemRead(duint va, void* dest, duint size);
@@ -91,14 +91,14 @@ duint DbgMemFindBaseAddr(duint addr, duint* size);
 bool DbgMemMap(MEMMAP* memmap);
 ```
 
-Структуры:
+Structures:
 
 ```c
 typedef struct { MEMORY_BASIC_INFORMATION mbi; char info[MAX_MODULE_SIZE]; } MEMPAGE;
 typedef struct { int count; MEMPAGE* page; } MEMMAP;
 ```
 
-## Выражения, символы, дизассемблирование (bridgemain.h)
+## Expressions, symbols, disassembly (bridgemain.h)
 
 ```c
 duint DbgValFromString(const char* string);
@@ -122,7 +122,7 @@ bool DbgXrefGet(duint addr, XREF_INFO* info);
 size_t DbgGetXrefCountAt(duint addr);
 ```
 
-## Точки останова (bridgemain.h)
+## Breakpoints (bridgemain.h)
 
 ```c
 BPXTYPE DbgGetBpxTypeAt(duint addr);
@@ -130,7 +130,7 @@ int DbgGetBpList(BPXTYPE type, BPMAP* list);
 bool DbgIsBpDisabled(duint addr);
 ```
 
-`BPXTYPE` — битовая маска, поэтому в `DbgGetBpList` значения можно комбинировать:
+`BPXTYPE` is a bitmask, so values can be combined in `DbgGetBpList`:
 
 ```c
 typedef enum
@@ -144,13 +144,13 @@ typedef enum
 } BPXTYPE;
 ```
 
-## DbgFunctions() — расширенные возможности (_dbgfunctions.h)
+## DbgFunctions() -- extended capabilities (_dbgfunctions.h)
 
 ```c
 const DBGFUNCTIONS* DbgFunctions();
 ```
 
-Поля структуры `DBGFUNCTIONS`, которые планируем использовать (указатели на функции):
+Fields of the `DBGFUNCTIONS` struct we plan to use (function pointers):
 
 ```c
 bool (*AssembleAtEx)(duint addr, const char* instruction, char* error, bool fillnop);
@@ -183,7 +183,7 @@ bool (*GetCmdline)(char* cmdline, size_t* cbsize);
 void (*RefreshModuleList)();
 ```
 
-Современный API точек останова через ссылки:
+The modern reference-based breakpoint API:
 
 ```c
 BP_REF* (*BpRefList)(duint* count);
@@ -196,35 +196,35 @@ bool (*BpGetFieldText)(const BP_REF* ref, BP_FIELD field, CBSTRING callback, voi
 bool (*BpSetFieldText)(const BP_REF* ref, BP_FIELD field, const char* value);
 ```
 
-Перечисление `BP_FIELD`: `bpf_type`, `bpf_offset`, `bpf_address`, `bpf_enabled`, `bpf_singleshoot`, `bpf_active`, `bpf_silent`, `bpf_typeex`, `bpf_hwsize`, `bpf_hwslot`, `bpf_oldbytes`, `bpf_fastresume`, `bpf_hitcount`, `bpf_module`, `bpf_name`, `bpf_breakcondition`, `bpf_logtext`, `bpf_logcondition`, `bpf_commandtext`, `bpf_commandcondition`, `bpf_logfile`.
+The `BP_FIELD` enum: `bpf_type`, `bpf_offset`, `bpf_address`, `bpf_enabled`, `bpf_singleshoot`, `bpf_active`, `bpf_silent`, `bpf_typeex`, `bpf_hwsize`, `bpf_hwslot`, `bpf_oldbytes`, `bpf_fastresume`, `bpf_hitcount`, `bpf_module`, `bpf_name`, `bpf_breakcondition`, `bpf_logtext`, `bpf_logcondition`, `bpf_commandtext`, `bpf_commandcondition`, `bpf_logfile`.
 
-Структура:
+Structure:
 
 ```c
 struct BP_REF { BPXTYPE type; duint module; duint offset; };
 ```
 
-Комментарий из заголовка: список `DBGFUNCTIONS` только дополняется в конец, вставлять в середину нельзя — иначе плагины ломаются.
+Comment from the header: the `DBGFUNCTIONS` list is append-only; nothing may be inserted in the middle, or existing plugins break.
 
-## Script API (пространство имён Script)
+## Script API (namespace Script)
 
-`_scriptapi_module.h`: `Script::Module::GetList(ListOf(ModuleInfo) list)`, `InfoFromAddr`, `InfoFromName`, `SectionListFromAddr`, `SectionListFromName`, `GetExports(const ModuleInfo* mod, ListOf(ModuleExport) list)`, `GetImports(const ModuleInfo* mod, ListOf(ModuleImport) list)`, `GetMainModuleInfo`. Со структурами `ModuleInfo { duint base; duint size; duint entry; int sectionCount; char name[MAX_MODULE_SIZE]; char path[MAX_PATH]; }`, `ModuleSectionInfo`, `ModuleExport`, `ModuleImport`. Вызывающая сторона обязана освободить список.
+`_scriptapi_module.h`: `Script::Module::GetList(ListOf(ModuleInfo) list)`, `InfoFromAddr`, `InfoFromName`, `SectionListFromAddr`, `SectionListFromName`, `GetExports(const ModuleInfo* mod, ListOf(ModuleExport) list)`, `GetImports(const ModuleInfo* mod, ListOf(ModuleImport) list)`, `GetMainModuleInfo`. With structures `ModuleInfo { duint base; duint size; duint entry; int sectionCount; char name[MAX_MODULE_SIZE]; char path[MAX_PATH]; }`, `ModuleSectionInfo`, `ModuleExport`, `ModuleImport`. The caller must free the list.
 
 `_scriptapi_memory.h`: `Script::Memory::Read(duint addr, void* data, duint size, duint* sizeRead)`, `Write`, `IsValidPtr`, `GetProtect`, `SetProtect`, `GetBase`, `GetSize`, `RemoteAlloc`, `RemoteFree`.
 
 `_scriptapi_pattern.h`: `Script::Pattern::FindMem(duint start, duint size, const char* pattern)`, `Find`, `WriteMem`, `SearchAndReplaceMem`.
 
-`_scriptapi_register.h`: `Script::Register::Get(RegisterEnum reg)`, `Set(RegisterEnum reg, duint value)`, `Size()`, а также именованные `GetCIP/SetCIP`, `GetCSP/SetCSP`, `GetCFLAGS/SetCFLAGS`.
+`_scriptapi_register.h`: `Script::Register::Get(RegisterEnum reg)`, `Set(RegisterEnum reg, duint value)`, `Size()`, plus the named accessors `GetCIP/SetCIP`, `GetCSP/SetCSP`, `GetCFLAGS/SetCFLAGS`.
 
-`_scriptapi_assembler.h`: `Script::Assembler::AssembleMemEx(duint addr, const char* instruction, int* size, char* error, bool fillnop)`, `AssembleEx(duint addr, unsigned char* dest, int* size, const char* instruction, char* error)`. Буфер `dest` размером 16 байт, `error` размером `MAX_ERROR_SIZE`.
+`_scriptapi_assembler.h`: `Script::Assembler::AssembleMemEx(duint addr, const char* instruction, int* size, char* error, bool fillnop)`, `AssembleEx(duint addr, unsigned char* dest, int* size, const char* instruction, char* error)`. The `dest` buffer is 16 bytes, `error` is `MAX_ERROR_SIZE`.
 
 `_scriptapi_misc.h`: `Script::Misc::ParseExpression(const char* expression, duint* value)`, `RemoteGetProcAddress(const char* module, const char* api)`, `ResolveLabel(const char* label)`.
 
-`_scriptapi_stack.h`: `Script::Stack::Peek(int offset)`, `Push`, `Pop`. Offset задаётся в кратных `Register::Size()`.
+`_scriptapi_stack.h`: `Script::Stack::Peek(int offset)`, `Push`, `Pop`. The offset is given in multiples of `Register::Size()`.
 
-## ПРЕДУПРЕЖДЕНИЕ: Script::Debug вызывает Wait()
+## WARNING: Script::Debug calls Wait()
 
-Проверенный факт из `src/dbg/_scriptapi_debug.cpp`: функции `Script::Debug::Run/Pause/Stop/StepIn/StepOver/StepOut` реализованы как `DbgCmdExecDirect(команда)` с последующим вызовом `Wait()`, а `Wait()` — это `_plugin_waituntilpaused()`. Следовательно, их использовать в проекте нельзя по той же причине, что и `_plugin_waituntilpaused`: цикл с `GuiProcessEvents()` и без таймаута. Вместо них — `DbgCmdExec` плюс собственное ожидание.
+Verified fact from `src/dbg/_scriptapi_debug.cpp`: the functions `Script::Debug::Run/Pause/Stop/StepIn/StepOver/StepOut` are implemented as `DbgCmdExecDirect(command)` followed by a call to `Wait()`, and `Wait()` is `_plugin_waituntilpaused()`. As a result, they must not be used in this project for the same reason as `_plugin_waituntilpaused`: a loop driven by `GuiProcessEvents()` with no timeout. We use `DbgCmdExec` plus our own wait instead.
 
 ```c
 SCRIPT_EXPORT void Script::Debug::Run()
@@ -234,9 +234,9 @@ SCRIPT_EXPORT void Script::Debug::Run()
 }
 ```
 
-Команды, которые эти обёртки шлют, поскольку мы будем слать те же команды напрямую: `run`, `pause`, `StopDebug`, `StepInto`, `StepOver`, `StepOut`, `bp <адрес>`, `bc <адрес>`, `bd <адрес>`, `bphws <адрес>, <rw|w|x>`, `bphwc <адрес>`.
+The commands these wrappers send, since we will be sending the same commands directly: `run`, `pause`, `StopDebug`, `StepInto`, `StepOver`, `StepOut`, `bp <address>`, `bc <address>`, `bd <address>`, `bphws <address>, <rw|w|x>`, `bphwc <address>`.
 
-## GUI-поток и лог
+## GUI thread and log
 
 ```c
 void GuiExecuteOnGuiThread(GUICALLBACK cbGuiThread);
@@ -253,11 +253,11 @@ void GuiUpdateRegisterView();
 void GuiUpdateBreakpointsView();
 ```
 
-Проверенный факт о захвате лога: в `src/gui/Src/Gui/LogView.cpp` при активном перенаправлении сообщение записывается в файл и при этом продолжает попадать в окно лога (переменная `msgUtf16` заполняется, если логирование включено). То есть `GuiLogRedirect` работает как ответвление копии, а не как замена вывода. Ограничение: слот перенаправления один, поэтому если его занимает плагин, пользователь не сможет пользоваться перенаправлением лога сам — захват лога должен быть отключаемым в конфигурации.
+Verified fact about log capture: in `src/gui/Src/Gui/LogView.cpp`, while redirection is active, a message is written to the file and still shows up in the log window (the `msgUtf16` variable is populated whenever logging is enabled). So `GuiLogRedirect` acts as a tee on the output rather than a replacement for it. Limitation: there is only one redirection slot, so if a plugin occupies it, the user loses access to log redirection for their own purposes; log capture must therefore be toggleable in the configuration.
 
-## Что ещё требуется проверить перед реализацией
+## What still needs to be verified before implementation
 
-- Синхронность `_gui_sendmessage`, через который реализованы `GuiLogSave` и `GuiLogRedirect`.
-- Какие именно `Dbg*`-функции безопасны при вызове из произвольного потока, а какие требуют, чтобы отладчик был в состоянии паузы.
-- Точный размер и раскладка `REGDUMP_AVX512` в текущей версии SDK, а также поведение `DbgGetRegDumpEx` при несовпадении размера.
-- Поведение перечисленных функций, когда отладка не запущена.
+- Whether `_gui_sendmessage`, which `GuiLogSave` and `GuiLogRedirect` are built on, is synchronous.
+- Which `Dbg*` functions are actually safe to call from an arbitrary thread, and which require the debugger to be paused.
+- The exact size and layout of `REGDUMP_AVX512` in the current SDK version, and how `DbgGetRegDumpEx` behaves on a size mismatch.
+- How the functions listed above behave when debugging is not running.

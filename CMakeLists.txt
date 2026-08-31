@@ -20,9 +20,9 @@ x64dbg_plugin(x64dbg-mcp
     src/plugin/service.cpp
 )
 
-# Версия плагина выводится из версии проекта — единый источник истины.
-# x64dbg показывает pluginVersion как целое число, поэтому кодируем
-# major.minor.patch в одно число: 0.1.0 -> 100, 1.2.3 -> 10203.
+# The plugin version is derived from the project version — a single source of truth.
+# x64dbg displays pluginVersion as a single integer, so we encode
+# major.minor.patch into one number: 0.1.0 -> 100, 1.2.3 -> 10203.
 math(EXPR PLUGIN_VERSION_INT "${PROJECT_VERSION_MAJOR} * 10000 + ${PROJECT_VERSION_MINOR} * 100 + ${PROJECT_VERSION_PATCH}")
 
 target_compile_definitions(x64dbg-mcp PRIVATE
@@ -30,15 +30,15 @@ target_compile_definitions(x64dbg-mcp PRIVATE
     PLUGIN_VERSION_STR="${PROJECT_VERSION}"
 )
 
-# Вендоренные header-only зависимости. Версии и лицензии — third_party/README.md.
+# Vendored header-only dependencies. Versions and licenses — third_party/README.md.
 add_library(nlohmann_json INTERFACE)
 target_include_directories(nlohmann_json INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 add_library(doctest INTERFACE)
 target_include_directories(doctest INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
-# Ядро плагина: состояние отладки и очередь задач.
-# Не зависит от SDK x64dbg, поэтому тестируется без отладчика.
+# Plugin core: debug state and the task queue.
+# Does not depend on the x64dbg SDK, so it is tested without the debugger.
 add_library(x64dbg-mcp-plugin-core STATIC
     src/plugin/debug_state.h
     src/plugin/debug_state.cpp
@@ -49,8 +49,8 @@ target_include_directories(x64dbg-mcp-plugin-core PUBLIC ${CMAKE_CURRENT_SOURCE_
 
 target_link_libraries(x64dbg-mcp PRIVATE x64dbg-mcp-plugin-core nlohmann_json)
 
-# Общий код моста и плагина: формат обмена, разбор кадров.
-# Не зависит ни от Windows API, ни от SDK x64dbg — поэтому тестируется отдельно.
+# Code shared between the bridge and the plugin: the exchange format, frame parsing.
+# Depends on neither the Windows API nor the x64dbg SDK — so it is tested separately.
 add_library(x64dbg-mcp-common STATIC
     src/common/framing.h
     src/common/framing.cpp
@@ -62,14 +62,14 @@ add_library(x64dbg-mcp-common STATIC
 )
 target_include_directories(x64dbg-mcp-common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(x64dbg-mcp-common PUBLIC nlohmann_json)
-# Advapi32: ConvertStringSecurityDescriptorToSecurityDescriptorA в pipe_server.cpp
-# (явные права доступа к именованному каналу).
+# Advapi32: ConvertStringSecurityDescriptorToSecurityDescriptorA in pipe_server.cpp
+# (explicit access rights for the named pipe).
 target_link_libraries(x64dbg-mcp-common PRIVATE Advapi32)
 
-# service.cpp собирает воедино очередь задач, канал и API x64dbg.
+# service.cpp ties together the task queue, the pipe, and the x64dbg API.
 target_link_libraries(x64dbg-mcp PRIVATE x64dbg-mcp-common)
 
-# Ядро MCP-сервера. Не содержит ввода-вывода, поэтому тестируется отдельно.
+# MCP server core. Contains no I/O, so it is tested separately.
 add_library(x64dbg-mcp-bridge-core STATIC
     src/bridge/logging.h
     src/bridge/logging.cpp
@@ -86,7 +86,7 @@ target_include_directories(x64dbg-mcp-bridge-core PUBLIC ${CMAKE_CURRENT_SOURCE_
 target_link_libraries(x64dbg-mcp-bridge-core PUBLIC nlohmann_json x64dbg-mcp-common)
 target_compile_definitions(x64dbg-mcp-bridge-core PUBLIC SERVER_VERSION_STR="${PROJECT_VERSION}")
 
-# Исполняемый файл сервера: транспорт stdio поверх ядра протокола.
+# Server executable: the stdio transport on top of the protocol core.
 add_executable(x64dbg-mcp-server
     src/bridge/main.cpp
     src/bridge/stdio_transport.h
@@ -95,23 +95,23 @@ add_executable(x64dbg-mcp-server
 set_target_properties(x64dbg-mcp-server PROPERTIES OUTPUT_NAME "x64dbg-mcp")
 target_link_libraries(x64dbg-mcp-server PRIVATE x64dbg-mcp-bridge-core)
 
-# Подопытная программа для ручной проверки инструментов.
-# Собирается только по явному запросу: cmake -B build64 -A x64 -DX64DBG_MCP_BUILD_TARGET=ON
-option(X64DBG_MCP_BUILD_TARGET "Собрать подопытную программу для ручных проверок" OFF)
+# Target program for manually exercising the tools.
+# Built only on explicit request: cmake -B build64 -A x64 -DX64DBG_MCP_BUILD_TARGET=ON
+option(X64DBG_MCP_BUILD_TARGET "Build the target program for manual checks" OFF)
 
 if(X64DBG_MCP_BUILD_TARGET)
     enable_language(C)
     add_executable(crackme tests/target/crackme.c)
-    # Оптимизация отключена намеренно: функции должны остаться отдельными
-    # и узнаваемыми в дизассемблере, иначе проверять инструменты бессмысленно.
+    # Optimization is disabled on purpose: functions must remain separate
+    # and recognizable in the disassembler, otherwise exercising the tools is pointless.
     target_compile_options(crackme PRIVATE /Od)
     set_target_properties(crackme PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION OFF
     )
 endif()
 
-# Юнит-тесты. Не требуют запущенного x64dbg и не линкуются с его SDK.
-option(X64DBG_MCP_BUILD_TESTS "Собрать юнит-тесты" ON)
+# Unit tests. Do not require a running x64dbg and are not linked against its SDK.
+option(X64DBG_MCP_BUILD_TESTS "Build unit tests" ON)
 
 if(X64DBG_MCP_BUILD_TESTS)
     enable_testing()

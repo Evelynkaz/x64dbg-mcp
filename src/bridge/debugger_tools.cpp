@@ -14,9 +14,9 @@ namespace x64dbg_mcp::bridge
 namespace
 {
 
-// Разбирает шестнадцатеричную строку (как её присылает memory.read) в байты.
-// Молча останавливается на первом некорректном символе — плагину доверяем,
-// но падать из-за одного плохого символа в дампе не стоит.
+// Parses a hex string (as sent by memory.read) into bytes. Silently stops
+// at the first invalid character — we trust the plugin, but it's not worth
+// failing over one bad character in a dump.
 std::vector<std::uint8_t> HexToBytes(const std::string& hex)
 {
     auto nibble = [](char c) -> int
@@ -40,8 +40,8 @@ std::vector<std::uint8_t> HexToBytes(const std::string& hex)
     return bytes;
 }
 
-// Привычный дамп памяти: смещение, 16 байт в шестнадцатеричном виде в
-// строке, затем колонка печатных символов (непечатные заменены точкой).
+// A familiar memory dump: offset, 16 bytes in hex on the line, then a
+// column of printable characters (non-printable ones replaced with a dot).
 std::string FormatHexDump(std::uint64_t baseAddress, const std::vector<std::uint8_t>& bytes)
 {
     std::ostringstream out;
@@ -72,7 +72,7 @@ std::string FormatHexDump(std::uint64_t baseAddress, const std::vector<std::uint
     return out.str();
 }
 
-// Листинг дизассемблера: одна строка на инструкцию — адрес, байты, мнемоника.
+// Disassembler listing: one line per instruction — address, bytes, mnemonic.
 std::string FormatDisasmListing(const nlohmann::json& instructions)
 {
     std::ostringstream out;
@@ -98,9 +98,9 @@ void RequireNonNegativeInteger(const nlohmann::json& arguments, const char* fiel
     }
 }
 
-// Проверяет, что поле — строка из заданного набора допустимых значений, и
-// возвращает её. Список допустимых значений печатается в сообщении об
-// ошибке, чтобы модель сразу увидела, что можно было передать.
+// Verifies that a field is a string from a given set of allowed values, and
+// returns it. The list of allowed values is printed in the error message so
+// the model immediately sees what it could have passed.
 std::string RequireEnumString(const nlohmann::json& arguments, const char* field,
                                std::initializer_list<const char*> allowed, const char* toolName)
 {
@@ -126,9 +126,10 @@ std::string RequireEnumString(const nlohmann::json& arguments, const char* field
     throw ToolError(std::string(toolName) + ": '" + field + "' must be one of: " + options.str());
 }
 
-// Человекочитаемая сводка результата debug.control/debug.step/debug.wait:
-// остановился ли процесс, по какой причине, по какому адресу и в каком
-// модуле. Если ожидание истекло, прямо сообщает, что процесс всё ещё бежит.
+// Human-readable summary of a debug.control/debug.step/debug.wait result:
+// whether the process stopped, for what reason, at what address, and in
+// what module. If the wait timed out, says outright that the process is
+// still running.
 std::string FormatPauseResult(const nlohmann::json& result)
 {
     if (result.value("timed_out", false))
@@ -156,8 +157,7 @@ std::string FormatPauseResult(const nlohmann::json& result)
     return out.str();
 }
 
-// Выровненная таблица точек останова: адрес, тип, состояние, число
-// срабатываний, имя.
+// Aligned table of breakpoints: address, type, state, hit count, name.
 std::string FormatBreakpointList(const nlohmann::json& breakpoints)
 {
     std::ostringstream out;
@@ -189,8 +189,8 @@ std::string FormatBreakpointList(const nlohmann::json& breakpoints)
     return out.str();
 }
 
-// Краткая читаемая сводка debugger.status для модели: адреса — в
-// шестнадцатеричном виде, десятичные адреса в реверсе бесполезны.
+// Short readable summary of debugger.status for the model: addresses in
+// hex — decimal addresses are useless in reverse engineering.
 std::string FormatDebuggerStatus(const nlohmann::json& status)
 {
     if (!status.value("debugging", false))
@@ -220,7 +220,7 @@ std::string FormatDebuggerStatus(const nlohmann::json& status)
     return out.str();
 }
 
-// Выровненная таблица модулей: база, размер, точка входа, имя.
+// Aligned table of modules: base, size, entry point, name.
 std::string FormatModuleList(const nlohmann::json& modules)
 {
     std::ostringstream out;
@@ -252,8 +252,8 @@ std::string FormatModuleList(const nlohmann::json& modules)
     return out.str();
 }
 
-// Заголовок модуля, таблица его секций и, если запрошены, таблицы экспорта
-// и импорта; при усечении списка отдельно сообщает о пределе в 4096 записей.
+// Module header, table of its sections, and, if requested, export and
+// import tables; if a list is truncated, separately reports the 4096-entry limit.
 std::string FormatModuleInfo(const nlohmann::json& result, bool includeExports, bool includeImports)
 {
     std::ostringstream out;
@@ -261,10 +261,11 @@ std::string FormatModuleInfo(const nlohmann::json& result, bool includeExports, 
     const std::string name = module.value("name", std::string());
     const std::string path = module.value("path", std::string());
 
-    // Числовые поля модуля печатаются как "unavailable", если их нет в
-    // ответе плагина, вместо молчаливого нуля — иначе расхождение формата
-    // между плагином и мостом (как было с плоским/вложенным JSON) снова
-    // будет незаметно маскироваться нулями в тексте.
+    // Numeric module fields are printed as "unavailable" if absent from the
+    // plugin's response, instead of silently defaulting to zero — otherwise
+    // a format mismatch between the plugin and the bridge (as happened with
+    // flat vs. nested JSON) would again get masked by zeros in the text
+    // without anyone noticing.
     auto formatHexField = [&module](const char* field) -> std::string
     {
         if (!module.contains(field) || !module[field].is_number_integer())
@@ -369,8 +370,8 @@ std::string FormatModuleInfo(const nlohmann::json& result, bool includeExports, 
     return out.str();
 }
 
-// Выровненная таблица регионов памяти: база, размер, состояние, тип, права,
-// описание. В конце — число регионов и суммарный объём закреплённой (commit) памяти.
+// Aligned table of memory regions: base, size, state, type, protection,
+// info. At the end — the number of regions and the total committed memory size.
 std::string FormatMemoryMap(const nlohmann::json& regions)
 {
     std::ostringstream out;
@@ -413,8 +414,8 @@ std::string FormatMemoryMap(const nlohmann::json& regions)
     return out.str();
 }
 
-// Выровненная таблица потоков: идентификатор, текущий адрес, точка входа,
-// приоритет, причина ожидания, имя; текущий поток отмечен звёздочкой.
+// Aligned table of threads: id, current address, entry point, priority,
+// wait reason, name; the current thread is marked with an asterisk.
 std::string FormatThreadList(const nlohmann::json& threads)
 {
     std::ostringstream out;
@@ -453,9 +454,9 @@ std::string FormatThreadList(const nlohmann::json& threads)
     return out.str();
 }
 
-// Печатает значение регистра в шестнадцатеричном виде независимо от того,
-// пришло ли оно числом (обычные регистры) или строкой (широкие регистры
-// SIMD, которые не помещаются в 64-битное целое JSON).
+// Prints a register value in hex regardless of whether it arrived as a
+// number (regular registers) or as a string (wide SIMD registers, which
+// don't fit into a 64-bit JSON integer).
 std::string FormatRegisterValue(const nlohmann::json& value)
 {
     if (value.is_number_integer())
@@ -474,8 +475,8 @@ std::string FormatRegisterValue(const nlohmann::json& value)
     return "0x0";
 }
 
-// Список регистров ({"name","value"}) в несколько колонок, чтобы группа
-// регистров помещалась на экран целиком, а не растягивалась на много строк.
+// A list of registers ({"name","value"}) in several columns, so a group of
+// registers fits on the screen as a whole instead of stretching over many lines.
 std::string FormatRegisterColumns(const nlohmann::json& registers, int columns)
 {
     std::ostringstream out;
@@ -499,10 +500,10 @@ std::string FormatRegisterColumns(const nlohmann::json& registers, int columns)
     return out.str();
 }
 
-// Человекочитаемая сводка registers.read: регистры общего назначения в
-// колонках, EFLAGS с перечнем установленных флагов, сегментные регистры,
-// отладочные регистры (только если хотя бы один ненулевой), и, если
-// запрошены, регистры SIMD по одному на строку.
+// Human-readable summary of registers.read: general-purpose registers in
+// columns, EFLAGS with a list of set flags, segment registers, debug
+// registers (only if at least one is non-zero), and, if requested, SIMD
+// registers one per line.
 std::string FormatRegisters(const nlohmann::json& result, bool includeSimd)
 {
     std::ostringstream out;
@@ -567,8 +568,8 @@ std::string FormatRegisters(const nlohmann::json& result, bool includeSimd)
     return out.str();
 }
 
-// Таблица кадров стека вызовов: номер кадра, адрес возврата на стеке,
-// откуда сделан вызов, куда он вёл, и комментарий отладчика.
+// Table of call stack frames: frame number, return address on the stack,
+// where the call was made from, where it led, and the debugger's comment.
 std::string FormatCallStack(const nlohmann::json& frames)
 {
     std::ostringstream out;
@@ -605,8 +606,8 @@ std::string FormatCallStack(const nlohmann::json& frames)
     return out.str();
 }
 
-// Таблица слов на вершине стека: адрес слота, значение, комментарий
-// отладчика к этому значению (например, если это адрес возврата).
+// Table of words at the top of the stack: slot address, value, the
+// debugger's comment on that value (e.g. if it is a return address).
 std::string FormatStackSlots(const nlohmann::json& slots)
 {
     std::ostringstream out;
@@ -630,6 +631,102 @@ std::string FormatStackSlots(const nlohmann::json& slots)
             << std::setw(18) << valueText.str()
             << comment << '\n';
     }
+    return out.str();
+}
+
+// Human-readable summary of string.read: the address and the string itself.
+std::string FormatReadString(const nlohmann::json& result)
+{
+    const std::uint64_t address = result.value("address", 0ULL);
+    const std::string text = result.value("string", std::string());
+
+    std::ostringstream out;
+    out << "0x" << std::hex << address << ": " << text;
+    return out.str();
+}
+
+// Human-readable summary of expression.eval: the expression, its value in
+// hex and decimal, and whether it points to readable memory.
+std::string FormatEvaluateExpression(const nlohmann::json& result)
+{
+    const std::string expression = result.value("expression", std::string());
+    const std::uint64_t value = result.value("value", 0ULL);
+    const bool pointerValid = result.value("pointerValid", false);
+
+    std::ostringstream out;
+    out << expression << " = 0x" << std::hex << value << std::dec << " (" << value << ")"
+        << (pointerValid ? "  [points to readable memory]" : "  [not a readable pointer]");
+    return out.str();
+}
+
+// Human-readable summary of pattern.find: a list of found addresses, one
+// per line, and the total number of matches; if the result was truncated
+// at the limit, a separate line about it.
+std::string FormatPatternMatches(const nlohmann::json& result)
+{
+    const nlohmann::json matches = result.value("matches", nlohmann::json::array());
+
+    std::ostringstream out;
+    for (const auto& match : matches)
+        out << "0x" << std::hex << match.get<std::uint64_t>() << '\n';
+    out << std::dec << matches.size() << " match" << (matches.size() == 1 ? "" : "es") << ".\n";
+    if (result.value("truncated", false))
+        out << "Result truncated at the requested limit; more matches may exist.\n";
+    return out.str();
+}
+
+// "Address, reference kind" table for xrefs.get; if there are no
+// references, says so directly and mentions the debugger analysis limitation.
+std::string FormatXrefs(const nlohmann::json& result)
+{
+    const std::uint64_t address = result.value("address", 0ULL);
+    const nlohmann::json xrefs = result.value("xrefs", nlohmann::json::array());
+
+    std::ostringstream out;
+    if (xrefs.empty())
+    {
+        out << "No references found to 0x" << std::hex << address
+            << ". Cross-references come from analysis already performed by "
+               "the debugger, so an unanalyzed module may report none even "
+               "though references exist in the code; running analysis on "
+               "the module from x64dbg's own Analysis menu first may help.\n";
+        return out.str();
+    }
+
+    out << std::left
+        << std::setw(18) << "Address"
+        << "Type" << '\n';
+    for (const auto& xref : xrefs)
+    {
+        const std::uint64_t xrefAddress = xref.value("address", 0ULL);
+        const std::string type = xref.value("type", std::string());
+
+        std::ostringstream addressText;
+        addressText << "0x" << std::hex << xrefAddress;
+
+        out << std::left
+            << std::setw(18) << addressText.str()
+            << type << '\n';
+    }
+    return out.str();
+}
+
+// A header with the function's bounds and size, then a listing like a
+// regular disassembly; if the function was truncated at the instruction
+// limit, a line about it.
+std::string FormatDisassembleFunction(const nlohmann::json& result)
+{
+    const std::uint64_t start = result.value("start", 0ULL);
+    const std::uint64_t end = result.value("end", 0ULL);
+    const nlohmann::json instructions = result.value("instructions", nlohmann::json::array());
+
+    std::ostringstream out;
+    out << "Function 0x" << std::hex << start << " - 0x" << end
+        << " (0x" << (end - start) << " bytes), " << std::dec << instructions.size()
+        << " instruction" << (instructions.size() == 1 ? "" : "s") << ".\n\n"
+        << FormatDisasmListing(instructions);
+    if (result.value("truncated", false))
+        out << "Instruction listing truncated at the tool's limit.\n";
     return out.str();
 }
 
@@ -1643,6 +1740,310 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(readStack));
+
+    Tool readString;
+    readString.name = "read_string";
+    readString.description =
+        "Read the string located at a memory address, decoded the way the "
+        "debugger itself recognizes it — the debugger determines the "
+        "encoding on its own (for example plain ASCII or UTF-16). Use it to "
+        "read messages, paths, names, and other text data referenced by "
+        "code; it is especially useful on the operand of an instruction "
+        "that loads the address of a string. Limitation: if the debugger "
+        "does not recognize a string at the given address, the tool fails "
+        "with an error — that does not mean there is no data there, only "
+        "that it does not look like a string. Parameters: 'address' — a "
+        "non-negative integer giving the address to read from (a number, "
+        "not a hex string).";
+    readString.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description", "Address to read the string from, given as a number (not a hex string)."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"address"})},
+        {"additionalProperties", false}
+    };
+    readString.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("read_string: plugin link is not configured");
+
+        RequireNonNegativeInteger(arguments, "address", "read_string");
+        const std::uint64_t address = arguments["address"].get<std::uint64_t>();
+
+        ToolResult result;
+        result.structuredContent = link->Call("string.read", {
+            {"address", address}
+        });
+        result.text = FormatReadString(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(readString));
+
+    Tool evaluateExpression;
+    evaluateExpression.name = "evaluate_expression";
+    evaluateExpression.description =
+        "Evaluate an expression written in x64dbg's expression language. "
+        "This is the most flexible inspection tool: it understands API "
+        "function names, registers, memory dereferences, and arithmetic. "
+        "Examples: 'kernel32.CreateFileW' — the address of an API "
+        "function; '[rsp+8]' — the value stored at that address; "
+        "'rax+0x10' — arithmetic on a register; 'crackme.exe:$0' — an "
+        "address given as an offset into a file. Returns the resulting "
+        "value together with a flag telling whether it points into memory "
+        "that is currently readable, so it is immediately clear whether "
+        "the value can be read with read_memory. Requires an active "
+        "debugging session; registers are only available while the "
+        "process is paused. Parameters: 'expression' — the expression to "
+        "evaluate, as a string.";
+    evaluateExpression.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"expression", {
+                {"type", "string"},
+                {"description",
+                 "x64dbg expression to evaluate, e.g. 'kernel32.CreateFileW', "
+                 "'[rsp+8]', 'rax+0x10', or 'crackme.exe:$0'."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"expression"})},
+        {"additionalProperties", false}
+    };
+    evaluateExpression.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("evaluate_expression: plugin link is not configured");
+
+        if (!arguments.contains("expression") || !arguments["expression"].is_string())
+            throw ToolError("evaluate_expression: 'expression' is required and must be a string");
+        const std::string expression = arguments["expression"].get<std::string>();
+
+        ToolResult result;
+        result.structuredContent = link->Call("expression.eval", {
+            {"expression", expression}
+        });
+        result.text = FormatEvaluateExpression(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(evaluateExpression));
+
+    Tool findPattern;
+    findPattern.name = "find_pattern";
+    findPattern.description =
+        "Search for a byte signature in the debuggee's memory. The search "
+        "range is given either as 'start' and 'size' together, or as "
+        "'module' alone, in which case the whole module is searched. "
+        "Signature format: hex bytes separated by spaces, with '??' "
+        "standing in for an unknown byte, for example "
+        "'48 8B ?? 24 ?? 48 89'. Unknown bytes matter because addresses "
+        "and offsets change between builds while the surrounding reference "
+        "instructions stay the same. Use this tool to find known code "
+        "sequences, magic constants, or structure headers again after a "
+        "rebuild. Limits: at most 256 matches and at most 256 MiB of range "
+        "are scanned per call; if there are more matches than the limit "
+        "allows, the corresponding flag in the result is true. Parameters: "
+        "'pattern' — the signature to search for; 'start' and 'size' — the "
+        "address range to search (used together); 'module' — the name of "
+        "a module to search entirely (mutually exclusive with 'start'/"
+        "'size'); 'max_results' — maximum number of matches to return, 1 "
+        "to 256, defaults to 32.";
+    findPattern.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"pattern", {
+                {"type", "string"},
+                {"description",
+                 "Byte signature to search for: hex bytes separated by spaces, with "
+                 "'??' for an unknown byte, e.g. '48 8B ?? 24 ?? 48 89'."}
+            }},
+            {"start", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Start address of the range to search, given as a number (not a hex "
+                 "string). Used together with 'size'."}
+            }},
+            {"size", {
+                {"type", "integer"},
+                {"minimum", 1},
+                {"maximum", 268435456},
+                {"description",
+                 "Size in bytes of the range to search, at most 268435456 (256 MiB). "
+                 "Used together with 'start'."}
+            }},
+            {"module", {
+                {"type", "string"},
+                {"description", "Name of the module to search entirely. Mutually exclusive with 'start'/'size'."}
+            }},
+            {"max_results", {
+                {"type", "integer"},
+                {"minimum", 1},
+                {"maximum", 256},
+                {"default", 32},
+                {"description", "Maximum number of matches to return, from 1 to 256. Defaults to 32."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"pattern"})},
+        {"anyOf", nlohmann::json::array({
+            { {"required", nlohmann::json::array({"start", "size"})} },
+            { {"required", nlohmann::json::array({"module"})} }
+        })},
+        {"additionalProperties", false}
+    };
+    findPattern.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("find_pattern: plugin link is not configured");
+
+        if (!arguments.contains("pattern") || !arguments["pattern"].is_string())
+            throw ToolError("find_pattern: 'pattern' is required and must be a string");
+        const std::string pattern = arguments["pattern"].get<std::string>();
+
+        const bool hasModule = arguments.contains("module");
+        const bool hasStart = arguments.contains("start");
+        const bool hasSize = arguments.contains("size");
+        if (hasModule && (hasStart || hasSize))
+            throw ToolError("find_pattern: 'module' cannot be combined with 'start'/'size'");
+        if (!hasModule && !(hasStart && hasSize))
+            throw ToolError("find_pattern: provide either 'start' and 'size', or 'module'");
+
+        nlohmann::json params = {{"pattern", pattern}};
+        if (hasModule)
+        {
+            if (!arguments["module"].is_string())
+                throw ToolError("find_pattern: 'module' must be a string");
+            params["module"] = arguments["module"].get<std::string>();
+        }
+        else
+        {
+            RequireNonNegativeInteger(arguments, "start", "find_pattern");
+            if (!arguments["size"].is_number_integer())
+                throw ToolError("find_pattern: 'size' must be a positive integer");
+            const long long size = arguments["size"].get<long long>();
+            if (size < 1 || size > 268435456)
+                throw ToolError("find_pattern: 'size' must be between 1 and 268435456 bytes (256 MiB)");
+            params["start"] = arguments["start"].get<std::uint64_t>();
+            params["size"] = size;
+        }
+
+        long long maxResults = 32;
+        if (arguments.contains("max_results"))
+        {
+            if (!arguments["max_results"].is_number_integer())
+                throw ToolError("find_pattern: 'max_results' must be an integer between 1 and 256");
+            maxResults = arguments["max_results"].get<long long>();
+            if (maxResults < 1 || maxResults > 256)
+                throw ToolError("find_pattern: 'max_results' must be between 1 and 256");
+        }
+        params["max_results"] = maxResults;
+
+        ToolResult result;
+        result.structuredContent = link->Call("pattern.find", params);
+        result.text = FormatPatternMatches(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(findPattern));
+
+    Tool findReferences;
+    findReferences.name = "find_references";
+    findReferences.description =
+        "List the places that reference a given address, together with "
+        "the kind of reference: a call, a jump, or a data access. Use it "
+        "to find every caller of a function, to find code that reads a "
+        "variable of interest, or to gauge how heavily a function is "
+        "used. Limitation: references come from analysis already "
+        "performed by the debugger, so unanalyzed regions may hold "
+        "references that are not listed here; an empty result does not "
+        "prove that no references exist. If a module has not been "
+        "analyzed yet, run analysis on it from x64dbg's own Analysis menu "
+        "first (a tool for running arbitrary debugger commands is planned "
+        "but not available yet). Parameters: 'address' — a "
+        "non-negative integer giving the address to find references to (a "
+        "number, not a hex string).";
+    findReferences.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description", "Address to find references to, given as a number (not a hex string)."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"address"})},
+        {"additionalProperties", false}
+    };
+    findReferences.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("find_references: plugin link is not configured");
+
+        RequireNonNegativeInteger(arguments, "address", "find_references");
+        const std::uint64_t address = arguments["address"].get<std::uint64_t>();
+
+        ToolResult result;
+        result.structuredContent = link->Call("xrefs.get", {
+            {"address", address}
+        });
+        result.text = FormatXrefs(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(findReferences));
+
+    Tool disassembleFunction;
+    disassembleFunction.name = "disassemble_function";
+    disassembleFunction.description =
+        "Disassemble an entire function, using the debugger's analysis to "
+        "determine its boundaries. Use it as the first step of analyzing "
+        "a function — it is more convenient than guessing the function's "
+        "length and calling disassemble several times. Returns the "
+        "function's start and end address together with its instructions, "
+        "in the same shape as disassemble. Limitations: the boundaries "
+        "come from the debugger's analysis, so the tool fails if no "
+        "function is defined at 'address'; if a module has not been "
+        "analyzed yet, run analysis on it from x64dbg's own Analysis menu "
+        "first (a tool for running arbitrary debugger commands is planned "
+        "but not available yet); very long functions are cut "
+        "off at the tool's instruction limit, which is reported by a "
+        "truncation flag in the result. Parameters: 'address' — a "
+        "non-negative integer giving an address inside the function to "
+        "disassemble (a number, not a hex string).";
+    disassembleFunction.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description", "Address inside the function to disassemble, given as a number (not a hex string)."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"address"})},
+        {"additionalProperties", false}
+    };
+    disassembleFunction.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("disassemble_function: plugin link is not configured");
+
+        RequireNonNegativeInteger(arguments, "address", "disassemble_function");
+        const std::uint64_t address = arguments["address"].get<std::uint64_t>();
+
+        ToolResult result;
+        result.structuredContent = link->Call("function.disasm", {
+            {"address", address}
+        });
+        result.text = FormatDisassembleFunction(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(disassembleFunction));
 }
 
 } // namespace x64dbg_mcp::bridge

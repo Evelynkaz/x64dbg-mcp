@@ -16,8 +16,8 @@ using x64dbg_mcp::PipeClient;
 namespace
 {
 
-// Уникальное имя канала на каждый тест, чтобы прогоны не мешали друг другу
-// (в том числе повторные прогоны всего набора тестов подряд).
+// A unique pipe name per test so runs don't interfere with each other
+// (including repeated back-to-back runs of the whole test suite).
 std::string MakePipeName()
 {
     static std::atomic<int> counter{0};
@@ -27,7 +27,7 @@ std::string MakePipeName()
 
 } // namespace
 
-TEST_CASE("pipe: запрос-ответ") {
+TEST_CASE("pipe: request-response") {
     const std::string pipeName = MakePipeName();
 
     PipeServer server;
@@ -45,7 +45,7 @@ TEST_CASE("pipe: запрос-ответ") {
     server.Stop();
 }
 
-TEST_CASE("pipe: несколько запросов подряд по одному соединению") {
+TEST_CASE("pipe: several requests in a row on one connection") {
     const std::string pipeName = MakePipeName();
 
     PipeServer server;
@@ -67,19 +67,19 @@ TEST_CASE("pipe: несколько запросов подряд по одно�
     server.Stop();
 }
 
-TEST_CASE("pipe: крупное сообщение проходит целиком и без искажений") {
+TEST_CASE("pipe: a large message passes through whole and undamaged") {
     const std::string pipeName = MakePipeName();
 
     PipeServer server;
     REQUIRE(server.Start(pipeName, [](const std::string& request) {
-        return request; // эхо, чтобы проверить целостность передачи
+        return request; // echo, to verify transfer integrity
     }));
 
     PipeClient client;
     REQUIRE(client.Connect(pipeName, 5000));
 
-    // Не менее 1 МиБ, содержимое меняется по периоду, не кратному степени
-    // двойки — чтобы сдвиг данных был заметен.
+    // At least 1 MiB, content varies with a period not a power of two —
+    // so any data shift would be noticeable.
     const size_t size = 1024 * 1024 + 37;
     std::string payload(size, '\0');
     for (size_t i = 0; i < size; ++i)
@@ -93,7 +93,7 @@ TEST_CASE("pipe: крупное сообщение проходит целико
     server.Stop();
 }
 
-TEST_CASE("pipe: двоичные данные с нулевыми байтами переживают передачу") {
+TEST_CASE("pipe: binary data with null bytes survives transfer") {
     const std::string pipeName = MakePipeName();
 
     PipeServer server;
@@ -116,8 +116,8 @@ TEST_CASE("pipe: двоичные данные с нулевыми байтам�
     server.Stop();
 }
 
-TEST_CASE("pipe: подключение к несуществующему каналу завершается неудачей быстро") {
-    const std::string pipeName = MakePipeName(); // сервер на этом имени не запускался
+TEST_CASE("pipe: connecting to a nonexistent pipe fails quickly") {
+    const std::string pipeName = MakePipeName(); // no server was started on this name
 
     PipeClient client;
     const auto start = std::chrono::steady_clock::now();
@@ -129,7 +129,7 @@ TEST_CASE("pipe: подключение к несуществующему кан
     CHECK(elapsed < std::chrono::milliseconds(1500));
 }
 
-TEST_CASE("pipe: исключение в обработчике не роняет сервер") {
+TEST_CASE("pipe: an exception in the handler does not crash the server") {
     const std::string pipeName = MakePipeName();
 
     PipeServer server;
@@ -154,14 +154,14 @@ TEST_CASE("pipe: исключение в обработчике не роняе�
                     .get<std::string>()
                     .empty());
 
-    // Соединение должно и дальше обслуживаться штатно.
+    // The connection must continue to be served normally.
     REQUIRE(client.SendRequest("still alive", response, 2000));
     CHECK(response == "ok:still alive");
 
     server.Stop();
 }
 
-TEST_CASE("pipe: остановка сервера при подключённом клиенте не виснет") {
+TEST_CASE("pipe: stopping the server while a client is connected does not hang") {
     const std::string pipeName = MakePipeName();
 
     PipeServer server;
@@ -180,7 +180,7 @@ TEST_CASE("pipe: остановка сервера при подключённо
     CHECK_FALSE(server.IsRunning());
 }
 
-TEST_CASE("pipe: повторный Stop и Stop без Start безопасны") {
+TEST_CASE("pipe: repeated Stop and Stop without Start are safe") {
     PipeServer neverStarted;
     neverStarted.Stop();
     neverStarted.Stop();
@@ -194,7 +194,7 @@ TEST_CASE("pipe: повторный Stop и Stop без Start безопасны
     CHECK_FALSE(server.IsRunning());
 }
 
-TEST_CASE("pipe: занятое имя канала — второй Start возвращает false") {
+TEST_CASE("pipe: pipe name already in use — a second Start returns false") {
     const std::string pipeName = MakePipeName();
 
     PipeServer serverA;
@@ -207,7 +207,7 @@ TEST_CASE("pipe: занятое имя канала — второй Start во�
     serverB.Stop();
 }
 
-TEST_CASE("pipe: подключение и отключение без единого запроса не убивают сервер (дефект 1)") {
+TEST_CASE("pipe: connecting and disconnecting without a single request does not kill the server (defect 1)") {
     const std::string pipeName = MakePipeName();
 
     PipeServer server;
@@ -215,11 +215,11 @@ TEST_CASE("pipe: подключение и отключение без един�
         return request + "-pong";
     }));
 
-    // Мост подключился и вышел, не отправив ни одного запроса (Ctrl-C,
-    // перезапуск клиента, проверка живости) — это штатная ситуация, а не
-    // повод остановить приём соединений навсегда. Повторяем цикл несколько
-    // раз: далеко не каждая попытка обязана попасть точно в узкое окно гонки
-    // ERROR_NO_DATA, но сервер обязан пережить их все.
+    // The bridge connected and exited without sending a single request
+    // (Ctrl-C, client restart, liveness check) — this is a normal situation,
+    // not a reason to stop accepting connections forever. We repeat the cycle
+    // several times: not every attempt is guaranteed to land exactly in the
+    // narrow ERROR_NO_DATA race window, but the server must survive them all.
     for (int cycle = 0; cycle < 5; ++cycle)
     {
         {
@@ -238,17 +238,17 @@ TEST_CASE("pipe: подключение и отключение без един�
     server.Stop();
 }
 
-TEST_CASE("pipe: остановка при долгом обработчике не приводит к утечке дескрипторов (дефект 2)") {
+TEST_CASE("pipe: stopping during a long-running handler does not leak handles (defect 2)") {
     auto getHandleCount = []() -> DWORD {
         DWORD count = 0;
         GetProcessHandleCount(GetCurrentProcess(), &count);
         return count;
     };
 
-    // Обработчик спит дольше предела ожидания присоединения потока в Stop()
-    // (5 секунд) — Stop() обязан отсоединить поток, а не дождаться его или
-    // закрыть дескрипторы у него из-под ног. Несколько циклов запуска и
-    // остановки не должны наращивать число дескрипторов процесса.
+    // The handler sleeps longer than the thread-join wait limit in Stop()
+    // (5 seconds) — Stop() must detach the thread instead of waiting for it
+    // or closing handles out from under it. Several start/stop cycles must
+    // not grow the process handle count.
     constexpr int kCycles = 3;
     constexpr int kHandlerSleepMs = 5500;
     DWORD baseline = 0;
@@ -279,23 +279,23 @@ TEST_CASE("pipe: остановка при долгом обработчике �
         const auto start = std::chrono::steady_clock::now();
         server.Stop();
         const auto elapsed = std::chrono::steady_clock::now() - start;
-        CHECK(elapsed < std::chrono::seconds(7)); // не ждём все kHandlerSleepMs обработчика
+        CHECK(elapsed < std::chrono::seconds(7)); // we don't wait for the handler's full kHandlerSleepMs
 
         requester.join();
 
-        // Даём отсоединённому потоку время фактически завершиться и закрыть
-        // свои дескрипторы, прежде чем измерять их число.
+        // Give the detached thread time to actually finish and close its
+        // handles before we measure their count.
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
         const DWORD current = getHandleCount();
         if (cycle == 0)
             baseline = current;
         else
-            CHECK(current <= baseline + 5); // допуск на служебный шум ОС/CRT
+            CHECK(current <= baseline + 5); // allowance for OS/CRT background noise
     }
 }
 
-TEST_CASE("pipe: несовпадение мажорной версии протокола отклоняет подключение (дефект 3)") {
+TEST_CASE("pipe: protocol major version mismatch rejects the connection (defect 3)") {
     const std::string pipeName = MakePipeName();
 
     PipeServer server;
@@ -309,7 +309,7 @@ TEST_CASE("pipe: несовпадение мажорной версии прот
     server.Stop();
 }
 
-TEST_CASE("pipe: отклонённое соединение не мешает следующему клиенту (дефект 1 и 3)") {
+TEST_CASE("pipe: a rejected connection does not block the next client (defects 1 and 3)") {
     const std::string pipeName = MakePipeName();
 
     PipeServer server;

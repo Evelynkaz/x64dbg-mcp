@@ -1,48 +1,48 @@
 #pragma once
 
-// Формат сообщений моста и плагина.
+// Message format between the bridge and the plugin.
 //
-// Запрос — объект с полями id, method, params.
-// Ответ — объект с полями id, ok и либо result (при успехе), либо error (при ошибке).
+// Request — an object with fields id, method, params.
+// Response — an object with fields id, ok, and either result (on success) or error (on failure).
 
 namespace x64dbg_mcp::ipc
 {
 
-// Версия протокола обмена. Мажорная версия меняется при несовместимых
-// изменениях; сторона с иной мажорной версией должна отказаться
-// от соединения, а не пытаться работать.
+// Protocol version. The major version changes on incompatible changes;
+// a side with a different major version must refuse the connection
+// rather than try to work with it.
 constexpr int kProtocolVersionMajor = 1;
 constexpr int kProtocolVersionMinor = 0;
 
-// Имя именованного канала по умолчанию.
+// Default named pipe name.
 constexpr const char* kDefaultPipeName = R"(\\.\pipe\x64dbg-mcp)";
 
-// Имена полей запроса.
+// Request field names.
 constexpr const char* kFieldId = "id";
 constexpr const char* kFieldMethod = "method";
 constexpr const char* kFieldParams = "params";
 
-// Имена полей ответа.
+// Response field names.
 constexpr const char* kFieldOk = "ok";
 constexpr const char* kFieldResult = "result";
 constexpr const char* kFieldError = "error";
 
-// Имена полей объекта ошибки.
+// Error object field names.
 constexpr const char* kFieldErrorCode = "code";
 constexpr const char* kFieldErrorMessage = "message";
 
-// Коды ошибок обмена.
+// Protocol error codes.
 enum class ErrorCode : int
 {
     None = 0,
-    InvalidRequest = 1,      // сообщение не разобралось или не хватает обязательных полей
-    UnknownMethod = 2,       // метод не зарегистрирован
-    NotDebugging = 3,        // отладка не запущена
-    DebuggerBusy = 4,        // процесс сейчас выполняется, операция требует паузы
-    InvalidArgument = 5,     // аргумент не прошёл проверку
-    Timeout = 6,             // операция не уложилась в отведённое время
-    OperationFailed = 7,     // отладчик отказался выполнить операцию
-    Internal = 8,            // непредвиденный сбой внутри плагина
+    InvalidRequest = 1,      // the message failed to parse or is missing required fields
+    UnknownMethod = 2,       // the method isn't registered
+    NotDebugging = 3,        // debugging isn't running
+    DebuggerBusy = 4,        // the process is currently running, the operation requires a pause
+    InvalidArgument = 5,     // an argument failed validation
+    Timeout = 6,             // the operation didn't finish within the allotted time
+    OperationFailed = 7,     // the debugger refused to perform the operation
+    Internal = 8,            // an unexpected failure inside the plugin
 };
 
 } // namespace x64dbg_mcp::ipc

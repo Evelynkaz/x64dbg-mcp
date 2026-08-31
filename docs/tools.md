@@ -1,114 +1,114 @@
-# Инструменты MCP-сервера
+# MCP server tools
 
-Ниже перечислены инструменты MCP-сервера версии 1, сгруппированные по назначению. Конечная цель проекта — довести сервер до уровня, на котором агент способен реверсить крякми под VMProtect, поэтому набор инструментов охватывает как полный доступ к отладчику, так и отдельную группу трассировки, без которой разбор виртуализованного кода невозможен.
+Below is the list of version-1 MCP server tools, grouped by purpose. The project's end goal is to bring the server to a level where the agent can reverse-engineer VMProtect-protected crackmes, so the tool set covers both full debugger access and a dedicated tracing group, without which analyzing virtualized code is impossible.
 
-Описания инструментов пишутся как документация для модели-агента: что делает инструмент, когда его применять, что он вернёт и какие у него ограничения. От качества этих описаний напрямую зависит качество реверса — агент выбирает инструмент и интерпретирует результат только по тому, что здесь написано.
+Tool descriptions are written as documentation for the model agent: what the tool does, when to use it, what it returns, and what its limits are. The quality of reverse-engineering depends directly on the quality of these descriptions — the agent picks a tool and interprets its result based solely on what is written here.
 
-## Принципы
+## Principles
 
-- Каждый инструмент возвращает и структурированный результат, и человекочитаемый текст.
-- Каждая операция управления отладкой принимает `wait` (по умолчанию включено) и `timeout_ms`, и возвращает состояние отладчика ПОСЛЕ операции: состояние, значение CIP, причину остановки. Агент не должен угадывать, чем закончилась асинхронная операция.
-- У каждой блокирующей операции есть таймаут. Зависший запрос обязан вернуть ошибку, а не заморозить отладчик.
-- Действуют лимиты: максимум байт на чтение, максимум инструкций на дизассемблирование, ограничение размера ответа.
-- **Тяжёлая работа выполняется внутри отладчика, а не циклом вызовов MCP.** Агент не должен делать по одному вызову на инструкцию: для этого существуют трассировка до условия, запись трассы и покрытие кода. Это критично для целей вроде разбора виртуализованного кода, где счёт идёт на сотни тысяч инструкций.
-- Группы «Запись» и «Команды» можно отключить в конфигурации; по умолчанию включены все.
-- **Произвольная команда не заменяет специализированный инструмент.** Инструмент `execute_command` даёт полный доступ к отладчику, но команды x64dbg — это действия, а не источник данных: из 308 документированных команд 266 не выставляют никаких переменных результата, а остальные возвращают в лучшем случае одно число. Всё, что агенту нужно прочитать, извлекается через API и отдаётся структурированно; команды остаются запасным путём для действий, у которых нет отдельного инструмента.
+- Every tool returns both a structured result and human-readable text.
+- Every debug-control operation accepts `wait` (enabled by default) and `timeout_ms`, and returns the debugger's state AFTER the operation: state, CIP value, stop reason. The agent should never have to guess how an asynchronous operation ended.
+- Every blocking operation has a timeout. A stuck request must return an error, not freeze the debugger.
+- Limits apply: a maximum number of bytes to read, a maximum number of instructions to disassemble, a cap on response size.
+- **Heavy work runs inside the debugger, not as a loop of MCP calls.** The agent must not make one call per instruction: that's what conditional tracing, trace recording, and code coverage exist for. This is critical for goals like analyzing virtualized code, where the instruction count runs into the hundreds of thousands.
+- The "Write" and "Commands" groups can be disabled in the configuration; all groups are enabled by default.
+- **An arbitrary command does not replace a dedicated tool.** The `execute_command` tool gives full access to the debugger, but x64dbg commands are actions, not a data source: out of 308 documented commands, 266 expose no result variables at all, and the rest return at best a single number. Anything the agent needs to read is exposed through the API and returned in structured form; commands remain a fallback path for actions that have no dedicated tool.
 
-## Группы инструментов
+## Tool groups
 
-### Состояние и осмотр (только чтение)
+### State and inspection (read-only)
 
-| Инструмент | Назначение | Опирается на |
+| Tool | Purpose | Backed by |
 |---|---|---|
-| `debugger_status` | Идёт ли отладка, состояние (выполняется/на паузе), PID, разрядность, текущий CIP, модуль | `DbgIsDebugging`, `DbgIsRunning`, `DbgGetProcessId`, `DbgGetThreadId`, `DbgGetDebugEngine` |
-| `list_modules` | Модули: база, размер, точка входа, путь | `Script::Module::GetList` |
-| `module_info` | Секции, экспорт, импорт модуля | `Script::Module::InfoFromName`, `SectionListFromName`, `GetExports`, `GetImports` |
-| `memory_map` | Регионы памяти, права, состояние | `DbgMemMap`, `DbgFunctions()->GetPageRights` |
-| `list_threads` | Потоки, идентификаторы, имена | `DbgGetThreadList`, `DbgFunctions()->ThreadGetName` |
-| `read_registers` | Регистры выбранного потока: общего назначения, флаги, сегментные, SIMD | `DbgGetRegDumpEx` |
-| `call_stack` | Стек вызовов | `DbgFunctions()->GetCallStackEx`, `GetCallStackByThread` |
-| `read_stack` | Содержимое стека с комментариями | `DbgStackCommentGet`, `DbgMemRead` |
-| `list_breakpoints` | Все точки останова со всеми полями | `DbgFunctions()->BpRefList`, `BpGetFieldNumber`, `BpGetFieldText` |
-| `list_symbols` | Символы, метки, комментарии | `DbgSymbolEnum`, `DbgGetLabelAt`, `DbgGetCommentAt` |
+| `debugger_status` | Whether debugging is active, state (running/paused), PID, bitness, current CIP, module | `DbgIsDebugging`, `DbgIsRunning`, `DbgGetProcessId`, `DbgGetThreadId`, `DbgGetDebugEngine` |
+| `list_modules` | Modules: base, size, entry point, path | `Script::Module::GetList` |
+| `module_info` | Module sections, exports, imports | `Script::Module::InfoFromName`, `SectionListFromName`, `GetExports`, `GetImports` |
+| `memory_map` | Memory regions, rights, state | `DbgMemMap`, `DbgFunctions()->GetPageRights` |
+| `list_threads` | Threads, identifiers, names | `DbgGetThreadList`, `DbgFunctions()->ThreadGetName` |
+| `read_registers` | Registers of the selected thread: general-purpose, flags, segment, SIMD | `DbgGetRegDumpEx` |
+| `call_stack` | Call stack | `DbgFunctions()->GetCallStackEx`, `GetCallStackByThread` |
+| `read_stack` | Stack contents with comments | `DbgStackCommentGet`, `DbgMemRead` |
+| `list_breakpoints` | All breakpoints with all fields | `DbgFunctions()->BpRefList`, `BpGetFieldNumber`, `BpGetFieldText` |
+| `list_symbols` | Symbols, labels, comments | `DbgSymbolEnum`, `DbgGetLabelAt`, `DbgGetCommentAt` |
 
-### Чтение и анализ
+### Reading and analysis
 
-| Инструмент | Назначение | Опирается на |
+| Tool | Purpose | Backed by |
 |---|---|---|
-| `read_memory` | Чтение с лимитом, вывод в hex с ASCII или base64 | `DbgMemRead`, `DbgMemIsValidReadPtr` |
-| `disassemble` | N инструкций от адреса | `DbgDisasmFastAt`, `GuiGetDisassembly` |
-| `disassemble_function` | Функция целиком по границам анализа | `DbgFunctionGet` |
-| `function_graph` | Граф потока управления функции; помогает разбирать запутанный и виртуализованный код | `DbgAnalyzeFunction` |
-| `read_string` | ASCII и UTF-16 с автоопределением | `DbgGetStringAt` |
-| `evaluate_expression` | Вычисление выражений x64dbg, включая имена API и разыменование | `DbgEval`, `Script::Misc::ParseExpression` |
-| `find_pattern` | Поиск байтовой сигнатуры с масками | `Script::Pattern::FindMem` |
-| `find_references` | Перекрёстные ссылки на адрес или строку | `DbgXrefGet`, `DbgGetXrefCountAt` |
-| `dump_memory` | Дамп региона в файл | — |
+| `read_memory` | Read with a limit, output as hex with ASCII or base64 | `DbgMemRead`, `DbgMemIsValidReadPtr` |
+| `disassemble` | N instructions from an address | `DbgDisasmFastAt`, `GuiGetDisassembly` |
+| `disassemble_function` | An entire function based on analysis boundaries | `DbgFunctionGet` |
+| `function_graph` | A function's control-flow graph; helps untangle obfuscated and virtualized code | `DbgAnalyzeFunction` |
+| `read_string` | ASCII and UTF-16 with auto-detection | `DbgGetStringAt` |
+| `evaluate_expression` | Evaluate x64dbg expressions, including API names and dereferencing | `DbgEval`, `Script::Misc::ParseExpression` |
+| `find_pattern` | Byte signature search with masks | `Script::Pattern::FindMem` |
+| `find_references` | Cross-references to an address or string | `DbgXrefGet`, `DbgGetXrefCountAt` |
+| `dump_memory` | Dump a region to a file | — |
 
-### Управление отладкой
+### Debug control
 
-| Инструмент | Назначение | Опирается на |
+| Tool | Purpose | Backed by |
 |---|---|---|
-| `debug_control` | `run`, `pause`, `stop`, `restart`, `run_to_address` | команды `run`, `pause`, `StopDebug`, постановка через `DbgCmdExec` с последующим ожиданием события паузы |
-| `step` | `into`, `over`, `out`, с указанием количества шагов | команды `StepInto`, `StepOver`, `StepOut` |
-| `wait_until_paused` | Явное ожидание остановки с таймаутом | — |
-| `set_breakpoint` | Программные, аппаратные и на память; с условием, логированием, командой при срабатывании, одноразовые | команды `bp`, `bphws`, `SetBreakpointCondition`, `SetBreakpointLog`, `SetBreakpointLogCondition`, `SetBreakpointCommand`, `SetBreakpointSingleshoot`, `SetBreakpointFastResume`, `SetBreakpointSilent` |
-| `manage_breakpoint` | Удалить, включить, выключить, сбросить счётчик срабатываний | команды `bc`, `bd`, `be`, `ResetBreakpointHitCount`, `GetBreakpointHitCount` |
+| `debug_control` | `run`, `pause`, `stop`, `restart`, `run_to_address` | the `run`, `pause`, `StopDebug` commands, queued via `DbgCmdExec` followed by waiting for the pause event |
+| `step` | `into`, `over`, `out`, with a step count | the `StepInto`, `StepOver`, `StepOut` commands |
+| `wait_until_paused` | Explicit wait for a halt with a timeout | — |
+| `set_breakpoint` | Software, hardware, and memory breakpoints; with condition, logging, an on-hit command, one-shot | the `bp`, `bphws` commands, `SetBreakpointCondition`, `SetBreakpointLog`, `SetBreakpointLogCondition`, `SetBreakpointCommand`, `SetBreakpointSingleshoot`, `SetBreakpointFastResume`, `SetBreakpointSilent` |
+| `manage_breakpoint` | Delete, enable, disable, reset hit count | the `bc`, `bd`, `be` commands, `ResetBreakpointHitCount`, `GetBreakpointHitCount` |
 
-### Трассировка и покрытие кода
+### Tracing and code coverage
 
-Эта группа существует ради задач, где счёт инструкций идёт на сотни тысяч — разбор виртуализованного и запакованного кода. Трассировка выполняется целиком внутри x64dbg, наружу отдаётся только результат.
+This group exists for tasks where the instruction count runs into the hundreds of thousands: analyzing virtualized and packed code. Tracing runs entirely inside x64dbg; only the result is handed back.
 
-| Инструмент | Назначение | Опирается на |
+| Tool | Purpose | Backed by |
 |---|---|---|
-| `trace_until` | Трассировка шагом с заходом или с обходом до выполнения условия либо до исчерпания лимита шагов. Ключевой инструмент группы | команды `TraceIntoConditional` (сокращение `ticnd`) и `TraceOverConditional` (сокращение `tocnd`); оба принимают условие первым аргументом и необязательный максимум шагов вторым |
-| `trace_record` | Запись трассы в файл: старт и остановка. Сама по себе запись не трассирует — нужна команда трассировки | команды `StartRunTrace` (синонимы `StartTraceRecording`, `opentrace`; аргумент — имя файла) и `StopRunTrace` |
-| `trace_log` | Настройка текста и условия журналирования во время трассировки | команды `TraceSetLog`, `TraceSetLogFile`, `TraceSetCommand` |
-| `code_coverage` | Какие адреса исполнялись и сколько раз | `DbgFunctions()->SetTraceRecordType`, `GetTraceRecordType`, `GetTraceRecordHitCount`, `GetTraceRecordByteType` |
-| `run_to_user_code` | Выйти из системного кода в пользовательский; ставит временные точки останова на страницы пользовательского кода, а не идёт по шагам. Полезно при распаковке. Ограничение из документации: команда завершается неудачей, если предыдущий такой же вызов ещё выполняется | команда `RunToUserCode` (сокращение `rtu`) |
+| `trace_until` | Step trace, into or over, until a condition is met or the step limit is exhausted. The key tool in this group | the `TraceIntoConditional` (short form `ticnd`) and `TraceOverConditional` (short form `tocnd`) commands; both take a condition as the first argument and an optional step maximum as the second |
+| `trace_record` | Record a trace to a file: start and stop. Recording alone does not trace — a trace command is still needed | the `StartRunTrace` command (aliases `StartTraceRecording`, `opentrace`; argument is a file name) and `StopRunTrace` |
+| `trace_log` | Configure the log text and condition used during tracing | the `TraceSetLog`, `TraceSetLogFile`, `TraceSetCommand` commands |
+| `code_coverage` | Which addresses were executed and how many times | `DbgFunctions()->SetTraceRecordType`, `GetTraceRecordType`, `GetTraceRecordHitCount`, `GetTraceRecordByteType` |
+| `run_to_user_code` | Leave system code and return to user code; sets temporary breakpoints on user-code pages rather than single-stepping. Useful for unpacking. Documented limitation: the command fails if a previous call of the same kind is still running | the `RunToUserCode` command (short form `rtu`) |
 
-### Запись (группу можно отключить)
+### Write (this group can be disabled)
 
-| Инструмент | Назначение | Опирается на |
+| Tool | Purpose | Backed by |
 |---|---|---|
-| `write_memory` | Запись байтов | `DbgMemWrite`, `DbgFunctions()->MemPatch` |
-| `set_register` | Изменение регистра | `Script::Register::Set` |
-| `assemble_at` | Ассемблирование инструкции по адресу, с дополнением nop-ами | `DbgFunctions()->AssembleAtEx`, `Script::Assembler::AssembleMemEx` |
-| `set_page_rights` | Изменение прав страницы памяти | `DbgFunctions()->SetPageRights` |
-| `patches` | Список патчей, откат, применение в файл | `DbgFunctions()->PatchEnum`, `PatchRestore`, `PatchRestoreRange`, `PatchFile` |
+| `write_memory` | Write bytes | `DbgMemWrite`, `DbgFunctions()->MemPatch` |
+| `set_register` | Change a register | `Script::Register::Set` |
+| `assemble_at` | Assemble an instruction at an address, padding with nops | `DbgFunctions()->AssembleAtEx`, `Script::Assembler::AssembleMemEx` |
+| `set_page_rights` | Change a memory page's rights | `DbgFunctions()->SetPageRights` |
+| `patches` | List patches, revert them, apply to a file | `DbgFunctions()->PatchEnum`, `PatchRestore`, `PatchRestoreRange`, `PatchFile` |
 
-### Команды и скрипты (группу можно отключить)
+### Commands and scripts (this group can be disabled)
 
-| Инструмент | Назначение | Опирается на |
+| Tool | Purpose | Backed by |
 |---|---|---|
-| `execute_command` | Произвольная команда x64dbg с возвратом результата и захваченного вывода лога. Универсальный запасной путь: всё, что не покрыто отдельным инструментом, доступно через него | — |
-| `run_script` | Запуск скрипта x64dbg | — |
-| `read_log` | Чтение вывода лога | — |
+| `execute_command` | An arbitrary x64dbg command, returning its result and captured log output. A universal fallback: anything not covered by a dedicated tool is available through this one | — |
+| `run_script` | Run an x64dbg script | — |
+| `read_log` | Read log output | — |
 
-### Инструменты уровня агента
+### Agent-level tools
 
-Эта группа существует не ради новых возможностей отладчика, а ради экономии обращений и контекста модели. Каждое обращение к MCP стоит агенту времени и места в контексте, поэтому там, где агент почти всегда запрашивает несколько вещей подряд, выгоднее отдать их одним вызовом. Ни один инструмент этой группы не даёт того, чего нельзя получить сочетанием остальных — он даёт это дешевле.
+This group does not exist to add new debugger capabilities, but to save the model's calls and context. Every MCP call costs the agent time and context space, so where the agent almost always requests several things in a row, it's cheaper to hand them back in one call. None of the tools in this group provides anything unattainable by combining the others — it just makes it cheaper.
 
-| Инструмент | Назначение | Опирается на |
+| Tool | Purpose | Backed by |
 |---|---|---|
-| `context_snapshot` | Полная картина после остановки одним вызовом: причина остановки, регистры с пометкой изменившихся, верхушка стека, дизассемблирование вокруг CIP с символами, текущий модуль и функция. Заменяет четыре-пять отдельных обращений, которые агент иначе делает после каждой паузы | `DbgGetRegDumpEx`, `DbgDisasmFastAt`, `DbgFunctions()->GetCallStackEx`, `DbgGetModuleAt` |
-| `analyze_function` | Разбор функции за один вызов: границы, дизассемблирование, входящие перекрёстные ссылки, вызываемые функции API, используемые строки и константы | `DbgFunctionGet`, `DbgDisasmFastAt`, `DbgXrefGet`, `DbgGetStringAt` |
-| `search_immediate` | Поиск непосредственных значений в коде модуля: магические числа, ключи шифрования, размеры буферов. Дополняет поиск по байтовой сигнатуре, когда искомое зашито в инструкцию, а не лежит в данных | `DbgDisasmFastAt`, `Script::Module::InfoFromName` |
-| `registers_diff` | Что изменилось в регистрах и флагах между двумя точками остановки | `DbgGetRegDumpEx` |
+| `context_snapshot` | The full picture right after a halt, in one call: stop reason, registers with changed ones flagged, top of the stack, disassembly around CIP with symbols, current module and function. Replaces the four or five separate calls the agent would otherwise make after every pause | `DbgGetRegDumpEx`, `DbgDisasmFastAt`, `DbgFunctions()->GetCallStackEx`, `DbgGetModuleAt` |
+| `analyze_function` | Break down a function in one call: boundaries, disassembly, incoming cross-references, called API functions, strings and constants used | `DbgFunctionGet`, `DbgDisasmFastAt`, `DbgXrefGet`, `DbgGetStringAt` |
+| `search_immediate` | Search for immediate values in a module's code: magic numbers, encryption keys, buffer sizes. Complements byte-signature search when the target is baked into an instruction rather than sitting in data | `DbgDisasmFastAt`, `Script::Module::InfoFromName` |
+| `registers_diff` | What changed in registers and flags between two halt points | `DbgGetRegDumpEx` |
 
-Инструменты `step` и `trace_until` возвращают изменения регистров и флагов вместе с новым состоянием, а не только само состояние. Причина в том, что при разборе виртуализованного кода смысл обработчика виртуальной машины виден именно из того, что он изменил. Заставлять модель сравнивать два полных дампа регистров означает тратить её контекст и получать ошибки сравнения там, где отладчик может дать готовый ответ.
+The `step` and `trace_until` tools return register and flag changes alongside the new state, not just the state itself. The reason is that when analyzing virtualized code, the meaning of a VM handler shows up precisely in what it changed. Making the model compare two full register dumps means burning its context and getting comparison errors in a place where the debugger can just hand over a ready answer.
 
-Дизассемблирование всегда возвращается с уже разрешёнными символами, метками и комментариями: агент не должен догадываться, что находится по адресу. Объёмные ответы поддерживают постраничную выборку, чтобы один большой фрагмент не вытеснял из контекста модели всё остальное.
+Disassembly always comes back with symbols, labels, and comments already resolved: the agent should never have to guess what lives at an address. Large responses support paged retrieval, so one big chunk doesn't push everything else out of the model's context.
 
-## Ресурсы и подсказки
+## Resources and prompts
 
-Ресурсы MCP — текущий дизассемблированный фрагмент и карта памяти. Подсказки — типовые сценарии: разбор функции, трассировка до вызова API, снятие антиотладки, разбор виртуализованного кода.
+MCP resources are the current disassembled fragment and the memory map. Prompts cover typical scenarios: analyzing a function, tracing to an API call, defeating anti-debugging, and analyzing virtualized code.
 
-Отдельный ресурс — справочник по командам x64dbg. Команд больше трёхсот, и модель не помнит их синтаксис наизусть, из-за чего склонна выдумывать несуществующие команды и аргументы. Справочник подключается как ресурс MCP, то есть попадает в контекст только тогда, когда действительно нужен. Официальная документация x64dbg распространяется по лицензии MIT, совместимой с лицензией проекта, поэтому справочник может быть собран на её основе с указанием авторства в THIRD_PARTY_LICENSES.
+A separate resource is the x64dbg command reference. There are over three hundred commands, and the model doesn't remember their syntax by heart, which makes it prone to inventing commands and arguments that don't exist. The reference is exposed as an MCP resource, so it only enters the context when it's actually needed. The official x64dbg documentation is distributed under the MIT license, which is compatible with the project's license, so the reference can be built from it with attribution given in THIRD_PARTY_LICENSES.
 
-## Что намеренно не вошло в первую версию
+## Deliberately out of scope for version 1
 
-- Работа с типами и структурами — сначала железобетонная основа, расширение потом.
-- Графическое взаимодействие — сначала железобетонная основа, расширение потом.
-- Управление окнами x64dbg — сначала железобетонная основа, расширение потом.
-- Работа с исходным кодом и отладочной информацией уровня строк — сначала железобетонная основа, расширение потом.
+- Working with types and structures — get the solid foundation first, extend later.
+- Graphical interaction — get the solid foundation first, extend later.
+- Managing x64dbg windows — get the solid foundation first, extend later.
+- Working with source code and line-level debug information — get the solid foundation first, extend later.

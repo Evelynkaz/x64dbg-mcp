@@ -2,6 +2,7 @@
 #include "plugin/plugin.h"
 #include "plugin/service.h"
 #include "pluginsdk/_scriptapi_module.h"
+#include "pluginsdk/_scriptapi_pattern.h"
 
 #include <chrono>
 #include <iomanip>
@@ -14,9 +15,9 @@ namespace x64dbg_mcp::plugin
 namespace
 {
 
-// Приводит timeoutMs к диапазону по умолчанию: <=0 значит "не задан" —
-// подставляется значение по умолчанию, а всё, что превышает верхний
-// предел, обрезается до него.
+// Clamps timeoutMs into the default range: <=0 means "not specified" and is
+// replaced with the default value, and anything over the upper limit is
+// clamped down to it.
 int ClampTimeout(int timeoutMs)
 {
     if (timeoutMs <= 0)
@@ -26,15 +27,15 @@ int ClampTimeout(int timeoutMs)
     return timeoutMs;
 }
 
-// ВАЖНО: в командах x64dbg аргументы разделяются ЗАПЯТОЙ, а не пробелом —
-// пробелом отделяется только имя команды от первого аргумента (см.
-// комментарий "arguments are separated by a COMMA (not space like WinDbg)"
-// в external/PluginTemplate/src/plugin.cpp и разбор argv[] по запятой в
-// external/x64dbg/src/dbg/commands/cmd-breakpoint-control.cpp). Команды с
-// одним аргументом (StepInto, StepOut, run, DeleteBPX и т.п.) этого не
-// затрагивают — разделять внутри одного аргумента нечего.
+// IMPORTANT: in x64dbg commands, arguments are separated by a COMMA, not a
+// space — a space only separates the command name from the first argument
+// (see the comment "arguments are separated by a COMMA (not space like
+// WinDbg)" in external/PluginTemplate/src/plugin.cpp and the comma-based
+// argv[] parsing in external/x64dbg/src/dbg/commands/cmd-breakpoint-control.cpp).
+// Commands with a single argument (StepInto, StepOut, run, DeleteBPX, etc.)
+// are not affected by this — there is nothing to separate within one argument.
 
-// Адреса в командах x64dbg передаются в шестнадцатеричном виде.
+// Addresses in x64dbg commands are passed in hexadecimal form.
 std::string FormatHexAddress(unsigned long long address)
 {
     std::ostringstream out;
@@ -55,9 +56,9 @@ std::string PauseReasonToString(PauseReason reason)
     }
 }
 
-// Общий хвост операций, отправивших асинхронную команду и опционально
-// ждущих последующую паузу: заполняет ControlResult по результату ожидания
-// (или немедленно, если ожидание не требуется).
+// Common tail for operations that sent an asynchronous command and
+// optionally wait for a subsequent pause: fills in ControlResult from the
+// wait outcome (or immediately, if no wait is requested).
 bool FinishWithWait(DebugStateTracker& tracker, unsigned long long beforeGeneration,
                      bool wait, int timeoutMs, ControlResult& out)
 {
@@ -89,10 +90,10 @@ bool RequireDebugging(std::string& error)
     return true;
 }
 
-// Регистры, стек вызовов и содержимое стека осмысленны только когда процесс
-// стоит на паузе: во время выполнения они меняются в произвольный момент, и
-// x64dbg вернул бы устаревший или произвольный снимок (см. аналогичное
-// ограничение для cip в GetStatus).
+// Registers, the call stack, and stack contents are only meaningful while
+// the process is paused: during execution they change at arbitrary moments,
+// and x64dbg would return a stale or arbitrary snapshot (see the analogous
+// restriction for cip in GetStatus).
 bool RequirePaused(const char* what, std::string& error)
 {
     if (!RequireDebugging(error))
@@ -105,8 +106,8 @@ bool RequirePaused(const char* what, std::string& error)
     return true;
 }
 
-// Форматирует 128-битное значение XMM-регистра как шестнадцатеричную строку
-// из 32 символов, старшая часть первой.
+// Formats a 128-bit XMM register value as a 32-character hex string,
+// high part first.
 std::string FormatXmmHex(const XMMREGISTER& xmm)
 {
     std::ostringstream out;
@@ -116,8 +117,8 @@ std::string FormatXmmHex(const XMMREGISTER& xmm)
     return out.str();
 }
 
-// Читает необязательное строковое поле. Возвращает false, если поле есть,
-// но имеет неверный тип.
+// Reads an optional string field. Returns false if the field is present
+// but has the wrong type.
 bool GetOptionalString(const nlohmann::json& params, const char* name, std::string& out, std::string& error)
 {
     if (!params.contains(name))
@@ -187,8 +188,8 @@ std::string MemTypeToString(DWORD type)
     }
 }
 
-// Названия элементов взяты дословно из THREADPRIORITY (bridgemain.h) без
-// ведущего подчёркивания.
+// Names are taken verbatim from THREADPRIORITY (bridgemain.h) without the
+// leading underscore.
 std::string ThreadPriorityToString(THREADPRIORITY priority)
 {
     switch (priority)
@@ -204,8 +205,8 @@ std::string ThreadPriorityToString(THREADPRIORITY priority)
     }
 }
 
-// Названия элементов взяты дословно из THREADWAITREASON (bridgemain.h) без
-// ведущего подчёркивания.
+// Names are taken verbatim from THREADWAITREASON (bridgemain.h) without the
+// leading underscore.
 std::string ThreadWaitReasonToString(THREADWAITREASON reason)
 {
     switch (reason)
@@ -251,6 +252,35 @@ std::string ThreadWaitReasonToString(THREADWAITREASON reason)
     }
 }
 
+// Rejects obviously invalid patterns before calling Script::Pattern::FindMem:
+// it does not distinguish "pattern is invalid" from "no matches", returning
+// 0 in both cases (see external/x64dbg/src/dbg/_scriptapi_pattern.cpp and
+// patterntransform in external/x64dbg/src/dbg/patternfind.cpp).
+bool LooksLikeValidPattern(const std::string& pattern)
+{
+    bool hasHexDigit = false;
+    for (char ch : pattern)
+    {
+        const bool isHex = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+        if (ch != '?' && ch != ' ' && !isHex)
+            return false;
+        if (isHex)
+            hasHexDigit = true;
+    }
+    return hasHexDigit;
+}
+
+std::string XrefTypeToString(XREFTYPE type)
+{
+    switch (type)
+    {
+    case XREF_DATA: return "data";
+    case XREF_JMP: return "jmp";
+    case XREF_CALL: return "call";
+    default: return "none";
+    }
+}
+
 } // namespace
 
 DebuggerStatus GetStatus()
@@ -271,9 +301,9 @@ DebuggerStatus GetStatus()
         status.processId = static_cast<unsigned int>(DbgGetProcessId());
         status.threadId = static_cast<unsigned int>(DbgGetThreadId());
 
-        // cip осмысленен только когда процесс стоит на паузе — во время
-        // выполнения DbgEval мог бы вернуть устаревшее или произвольное
-        // значение, поэтому оставляем 0, как и задокументировано в заголовке.
+        // cip is only meaningful while the process is paused — during
+        // execution DbgEval could return a stale or arbitrary value, so we
+        // leave it at 0, as documented in the header.
         if (!status.running)
         {
             bool success = false;
@@ -363,12 +393,12 @@ bool Disassemble(unsigned long long address, size_t count, std::vector<Instructi
         for (size_t i = 0; i < count; ++i)
         {
             if (!DbgMemIsValidReadPtr(addr))
-                break; // дальше по этому адресу нечего разбирать — отдаём то, что успели
+                break; // nothing further to disassemble at this address — return what we have
 
             BASIC_INSTRUCTION_INFO basicInfo = {};
             DbgDisasmFastAt(addr, &basicInfo);
             if (basicInfo.size <= 0)
-                break; // размер инструкции неизвестен — прекращаем разбор
+                break; // instruction size unknown — stop disassembling
 
             Instruction instruction;
             instruction.address = static_cast<unsigned long long>(addr);
@@ -438,8 +468,8 @@ bool Control(const std::string& action, unsigned long long address, bool hasAddr
             if (!RequireDebugging(error))
                 return false;
             DbgCmdExec("StopDebug");
-            // "stop" не переводит процесс в паузу, поэтому WaitForPauseAfter
-            // здесь неприменим — просто отдаём состояние сразу после отправки команды.
+            // "stop" does not put the process into a pause, so WaitForPauseAfter
+            // does not apply here — just return the state right after sending the command.
             out.paused = false;
             out.timedOut = false;
             out.pauseReason.clear();
@@ -463,10 +493,11 @@ bool Control(const std::string& action, unsigned long long address, bool hasAddr
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(clampedTimeout);
             DbgCmdExec("StopDebug");
 
-            // Ждём именно ОТСУТСТВИЯ сессии отладки, а не паузы: в DebugStateTracker
-            // есть уведомление о завершении отладки, но само по себе оно не гарантирует,
-            // что процесс уже завершился и путь свободен для повторной загрузки —
-            // поэтому опрашиваем DbgIsDebugging() напрямую с небольшим шагом.
+            // We wait specifically for the ABSENCE of a debugging session, not for a
+            // pause: DebugStateTracker does have a notification for debugging having
+            // stopped, but that alone doesn't guarantee the process has actually
+            // terminated and the path is free for reloading — so we poll
+            // DbgIsDebugging() directly with a small step.
             while (DbgIsDebugging())
             {
                 if (std::chrono::steady_clock::now() >= deadline)
@@ -546,11 +577,11 @@ bool Step(const std::string& mode, int count, bool wait, int timeoutMs,
 
         if (mode == "over")
         {
-            // StepOver не принимает количество шагов, поэтому повторяем команду
-            // в цикле, каждый раз дожидаясь фактической остановки перед
-            // следующей итерацией — иначе шаги отправятся в очередь, не
-            // дожидаясь друг друга, и часть из них будет потеряна или
-            // выполнена не с того места.
+            // StepOver does not accept a step count, so we repeat the command in a
+            // loop, waiting for the actual stop each time before the next
+            // iteration — otherwise the steps would be queued up without
+            // waiting for one another, and some of them would be lost or
+            // executed from the wrong place.
             for (int i = 0; i < count; ++i)
             {
                 const auto before = tracker.Current().generation;
@@ -593,9 +624,9 @@ bool WaitUntilPaused(int timeoutMs, ControlResult& out, std::string& error)
         const int clampedTimeout = ClampTimeout(timeoutMs);
         auto& tracker = McpService::Instance().Tracker();
 
-        // Если процесс уже стоит на паузе, возвращаемся немедленно: ждать
-        // поколение "строго больше текущего" здесь не нужно — текущая пауза
-        // и есть та, которую ожидает вызывающий.
+        // If the process is already paused, return immediately: there's no
+        // need to wait for a generation "strictly greater than the current
+        // one" here — the current pause is exactly the one the caller is waiting for.
         const StateSnapshot current = tracker.Current();
         if (current.state == RunState::Paused)
         {
@@ -709,8 +740,8 @@ bool SetBreakpoint(const nlohmann::json& params, std::string& error)
             return false;
         }
 
-        // Дополнительные настройки применяются отдельными командами к уже
-        // созданной точке останова, поэтому её сперва нужно найти по адресу.
+        // Additional settings are applied via separate commands to the
+        // breakpoint that already exists, so it must first be located by address.
         BP_REF ref{};
         if (!DbgFunctions()->BpRefVa(&ref, bpType, static_cast<duint>(address)))
         {
@@ -855,10 +886,10 @@ bool ListBreakpoints(std::vector<BreakpointInfo>& out, std::string& error)
         duint count = 0;
         BP_REF* refs = functions->BpRefList(&count);
 
-        // BpRefList выделяет память через BridgeAlloc (см. реализацию в
-        // external/x64dbg/src/dbg/_dbgfunctions.cpp); эталонный потребитель
-        // этой же функции внутри самого x64dbg — src/gui/Src/Gui/BreakpointsView.cpp —
-        // освобождает результат строго через BridgeFree, поэтому делаем так же.
+        // BpRefList allocates memory via BridgeAlloc (see the implementation in
+        // external/x64dbg/src/dbg/_dbgfunctions.cpp); the reference consumer of
+        // this same function within x64dbg itself — src/gui/Src/Gui/BreakpointsView.cpp —
+        // frees the result strictly through BridgeFree, so we do the same.
         struct RefsGuard
         {
             BP_REF* ptr;
@@ -912,8 +943,8 @@ bool ListModules(std::vector<ModuleEntry>& out, std::string& error)
         if (!RequireDebugging(error))
             return false;
 
-        // BridgeList сам чистит и освобождает свои данные в деструкторе —
-        // вручную освобождать список модулей не нужно.
+        // BridgeList cleans up and frees its own data in its destructor —
+        // no need to manually free the module list.
         BridgeList<Script::Module::ModuleInfo> modules;
         if (!Script::Module::GetList(&modules))
         {
@@ -973,7 +1004,7 @@ bool GetModuleDetails(const std::string& name, unsigned long long address, bool 
         out.module.name = info.name;
         out.module.path = info.path;
 
-        // BridgeList сам чистит и освобождает свои данные в деструкторе.
+        // BridgeList cleans up and frees its own data in its destructor.
         BridgeList<Script::Module::ModuleSectionInfo> sections;
         if (Script::Module::SectionListFromName(info.name, &sections))
         {
@@ -1056,9 +1087,9 @@ bool GetMemoryMap(std::vector<MemoryRegion>& out, std::string& error)
             return false;
         }
 
-        // DbgMemMap выделяет memoryMap.page через BridgeAlloc, а не через
-        // ListInfo/BridgeList — освобождать нужно вручную, как это делает
-        // эталонный потребитель этой функции,
+        // DbgMemMap allocates memoryMap.page via BridgeAlloc, not through
+        // ListInfo/BridgeList — it must be freed manually, the same way the
+        // reference consumer of this function does it,
         // external/x64dbg/src/gui/Src/Gui/MemoryMapView.cpp.
         struct MapGuard
         {
@@ -1105,9 +1136,9 @@ bool ListThreads(std::vector<ThreadEntry>& out, std::string& error)
         THREADLIST threadList = {};
         DbgGetThreadList(&threadList);
 
-        // DbgGetThreadList выделяет threadList.list через BridgeAlloc;
-        // эталонный потребитель — external/x64dbg/src/gui/Src/Gui/ThreadView.cpp —
-        // освобождает результат через BridgeFree, поэтому делаем так же.
+        // DbgGetThreadList allocates threadList.list via BridgeAlloc;
+        // the reference consumer — external/x64dbg/src/gui/Src/Gui/ThreadView.cpp —
+        // frees the result through BridgeFree, so we do the same.
         struct ListGuard
         {
             THREADLIST* list;
@@ -1181,7 +1212,7 @@ bool ReadRegisters(bool includeSimd, RegisterDump& out, std::string& error)
         };
 
         out.eflags = static_cast<unsigned long long>(ctx.eflags);
-        // Стандартная раскладка регистра флагов x86: CF(0), PF(2), AF(4),
+        // Standard x86 flags register layout: CF(0), PF(2), AF(4),
         // ZF(6), SF(7), TF(8), IF(9), DF(10), OF(11).
         auto bit = [&](int n) { return (out.eflags & (1ull << n)) != 0; };
         out.flags = {
@@ -1189,8 +1220,8 @@ bool ReadRegisters(bool includeSimd, RegisterDump& out, std::string& error)
             {"TF", bit(8)}, {"IF", bit(9)}, {"DF", bit(10)}, {"OF", bit(11)}
         };
 
-        // SIMD-регистры включаются только по запросу: шестнадцать 128-битных
-        // значений заметно раздувают ответ, а нужны они редко.
+        // SIMD registers are only included on request: sixteen 128-bit
+        // values noticeably bloat the response, and they're rarely needed.
         if (includeSimd)
         {
 #ifdef _WIN64
@@ -1200,7 +1231,7 @@ bool ReadRegisters(bool includeSimd, RegisterDump& out, std::string& error)
 #endif
             for (int i = 0; i < kXmmCount; ++i)
             {
-                // Младшие 128 бит ZMM-регистра — это и есть классический XMM.
+                // The low 128 bits of a ZMM register are exactly the classic XMM.
                 const XMMREGISTER& xmm = ctx.ZmmRegisters[i].Low.Low;
                 out.simd.emplace_back("xmm" + std::to_string(i), FormatXmmHex(xmm));
             }
@@ -1236,7 +1267,7 @@ bool GetCallStack(unsigned int threadId, std::vector<CallStackFrame>& out, std::
             THREADLIST threadList = {};
             DbgGetThreadList(&threadList);
 
-            // См. аналогичное освобождение через BridgeFree в ListThreads.
+            // See the analogous BridgeFree cleanup in ListThreads.
             struct ListGuard
             {
                 THREADLIST* list;
@@ -1261,9 +1292,9 @@ bool GetCallStack(unsigned int threadId, std::vector<CallStackFrame>& out, std::
             DbgFunctions()->GetCallStackByThread(handle, &callstack);
         }
 
-        // GetCallStackEx/GetCallStackByThread выделяют callstack.entries через
-        // BridgeAlloc; эталонный потребитель — external/x64dbg/src/gui/Src/Gui/CallStackView.cpp —
-        // освобождает результат через BridgeFree, поэтому делаем так же.
+        // GetCallStackEx/GetCallStackByThread allocate callstack.entries via
+        // BridgeAlloc; the reference consumer — external/x64dbg/src/gui/Src/Gui/CallStackView.cpp —
+        // frees the result through BridgeFree, so we do the same.
         struct CallStackGuard
         {
             DBGCALLSTACK* stack;
@@ -1335,6 +1366,214 @@ bool ReadStack(size_t count, std::vector<StackSlot>& out, std::string& error)
     {
         out.clear();
         error = "Internal error while reading the stack";
+        return false;
+    }
+}
+
+bool ReadStringAt(unsigned long long address, std::string& out, std::string& error)
+{
+    out.clear();
+    try
+    {
+        if (!RequirePaused("a string", error))
+            return false;
+
+        char text[MAX_STRING_SIZE] = {};
+        if (!DbgGetStringAt(static_cast<duint>(address), text))
+        {
+            error = "The debugger did not recognize a string at the given address";
+            return false;
+        }
+        out = text;
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        error = "Internal error while reading a string";
+        return false;
+    }
+}
+
+bool EvaluateExpression(const std::string& expression, EvalResult& out, std::string& error)
+{
+    out = EvalResult{};
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        if (!DbgIsValidExpression(expression.c_str()))
+        {
+            error = "Expression is not syntactically valid";
+            return false;
+        }
+
+        bool success = false;
+        const duint value = DbgEval(expression.c_str(), &success);
+        if (!success)
+        {
+            error = "Failed to evaluate the expression";
+            return false;
+        }
+
+        out.value = static_cast<unsigned long long>(value);
+        out.pointerValid = DbgMemIsValidReadPtr(static_cast<duint>(value));
+        return true;
+    }
+    catch (...)
+    {
+        out = EvalResult{};
+        error = "Internal error while evaluating the expression";
+        return false;
+    }
+}
+
+bool FindPattern(unsigned long long start, unsigned long long size, const std::string& pattern,
+                 size_t maxResults, std::vector<unsigned long long>& out, bool& truncated, std::string& error)
+{
+    out.clear();
+    truncated = false;
+    try
+    {
+        if (!RequirePaused("memory for a pattern", error))
+            return false;
+
+        if (pattern.empty() || !LooksLikeValidPattern(pattern))
+        {
+            error = "Pattern is empty or not a valid hex/wildcard byte signature";
+            return false;
+        }
+        if (size == 0)
+        {
+            error = "Search range size must be greater than zero";
+            return false;
+        }
+        if (size > kMaxPatternRangeSize)
+        {
+            error = "Search range size exceeds the maximum of 256 MiB";
+            return false;
+        }
+        if (maxResults == 0 || maxResults > kMaxPatternResults)
+        {
+            error = "Parameter \"max_results\" must be between 1 and 256";
+            return false;
+        }
+
+        duint cursor = static_cast<duint>(start);
+        const duint rangeEnd = static_cast<duint>(start + size);
+        while (cursor < rangeEnd && out.size() < maxResults)
+        {
+            const duint remaining = rangeEnd - cursor;
+            const duint found = Script::Pattern::FindMem(cursor, remaining, pattern.c_str());
+            if (found == 0)
+                break; // no more matches, or this part of memory is unreadable
+
+            out.push_back(static_cast<unsigned long long>(found));
+            cursor = found + 1; // continue from the byte after the one found
+        }
+
+        // If the limit was reached, separately check the remaining range for
+        // one more match, so truncated reflects reality rather than just
+        // the fact that the limit was hit.
+        if (out.size() >= maxResults && cursor < rangeEnd)
+            truncated = Script::Pattern::FindMem(cursor, rangeEnd - cursor, pattern.c_str()) != 0;
+
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        truncated = false;
+        error = "Internal error while searching for the pattern";
+        return false;
+    }
+}
+
+bool GetXrefs(unsigned long long address, std::vector<XrefEntry>& out, std::string& error)
+{
+    out.clear();
+    try
+    {
+        if (!RequirePaused("cross-references", error))
+            return false;
+
+        // DbgXrefGet's own handler treats "zero references" as failure (see
+        // external/x64dbg/src/dbg/_exports.cpp:1402-1414: it computes the
+        // count first, and returns false precisely when that count is
+        // zero). So a false return there does not mean an error; it means
+        // there are no cross-references, which is a normal, successful
+        // result with an empty list. Check the count ourselves first to
+        // tell that apart from a real failure.
+        const size_t refCount = DbgGetXrefCountAt(static_cast<duint>(address));
+        if (refCount == 0)
+            return true;
+
+        XREF_INFO xrefInfo{};
+        xrefInfo.refcount = 0;
+        xrefInfo.references = nullptr;
+
+        if (!DbgXrefGet(static_cast<duint>(address), &xrefInfo))
+        {
+            error = "Failed to retrieve cross-references for the given address";
+            return false;
+        }
+
+        // See the analogous BridgeFree cleanup in other functions in this
+        // file; confirmed in
+        // external/x64dbg/src/gui/Src/Gui/CPUInfoBox.cpp:490-494 and
+        // external/x64dbg/src/gui/Src/BasicView/Disassembly.cpp:1625.
+        struct XrefGuard
+        {
+            XREF_INFO* info;
+            ~XrefGuard() { if (info->references) BridgeFree(info->references); }
+        } guard{&xrefInfo};
+
+        out.reserve(static_cast<size_t>(xrefInfo.refcount));
+        for (duint i = 0; i < xrefInfo.refcount; ++i)
+        {
+            const XREF_RECORD& record = xrefInfo.references[i];
+            XrefEntry entry;
+            entry.address = static_cast<unsigned long long>(record.addr);
+            entry.type = XrefTypeToString(record.type);
+            out.push_back(std::move(entry));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        error = "Internal error while retrieving cross-references";
+        return false;
+    }
+}
+
+bool GetFunctionRange(unsigned long long address, unsigned long long& start, unsigned long long& end, std::string& error)
+{
+    start = 0;
+    end = 0;
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        duint funcStart = 0, funcEnd = 0;
+        if (!DbgFunctionGet(static_cast<duint>(address), &funcStart, &funcEnd))
+        {
+            error = "The debugger does not know the function boundaries at the given address: "
+                    "running module analysis first may help";
+            return false;
+        }
+
+        start = static_cast<unsigned long long>(funcStart);
+        end = static_cast<unsigned long long>(funcEnd);
+        return true;
+    }
+    catch (...)
+    {
+        start = 0;
+        end = 0;
+        error = "Internal error while retrieving the function boundaries";
         return false;
     }
 }

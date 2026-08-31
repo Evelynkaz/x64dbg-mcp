@@ -6,8 +6,8 @@
 
 #include <memory>
 
-// GetCurrentProcessId используется для запасного имени канала; windows.h уже
-// подключён транзитивно через plugin.h -> bridgemain.h.
+// GetCurrentProcessId is used for the fallback pipe name; windows.h is
+// already pulled in transitively via plugin.h -> bridgemain.h.
 
 namespace x64dbg_mcp::plugin
 {
@@ -15,19 +15,18 @@ namespace x64dbg_mcp::plugin
 namespace
 {
 
-// Таймаут по умолчанию для одного обращения к DebuggerWorker.
+// Default timeout for a single call into DebuggerWorker.
 constexpr int kDefaultTimeoutMs = 5000;
 
-// Дополнительное время сверх таймаута ожидания паузы, которое даётся
-// DebuggerWorker::Submit на постановку задачи в очередь. Таймаут ожидания
-// паузы (до 300000 мс, см. debugger.h) целиком проживает ВНУТРИ задачи,
-// поэтому Submit обязан ждать дольше — иначе он вернёт Timeout раньше, чем
-// задача успеет фактически завершиться, хотя отладчик всё ещё работает.
+// Extra time on top of the pause-wait timeout that DebuggerWorker::Submit is
+// given for queuing the task. The pause-wait timeout (up to 300000 ms, see
+// debugger.h) lives entirely INSIDE the task, so Submit must wait longer —
+// otherwise it would return Timeout before the task actually finishes, even
+// though the debugger is still working.
 constexpr int kWaitSubmitSlackMs = 5000;
 
-// Зеркалит ограничение таймаута из debugger.cpp (там оно применяется к
-// самому ожиданию паузы), чтобы здесь верно рассчитать таймаут постановки
-// задачи в очередь.
+// Mirrors the timeout clamp from debugger.cpp (there it applies to the pause
+// wait itself), so the timeout for queuing the task is computed correctly here.
 int ClampControlTimeout(int timeoutMs)
 {
     if (timeoutMs <= 0)
@@ -71,8 +70,8 @@ std::string BuildOkResponse(const nlohmann::json& id, const nlohmann::json& resu
     return response.dump();
 }
 
-// Переводит результат DebuggerWorker::Submit в код и текст ошибки протокола.
-// Возвращает true, если задача выполнена и результат можно использовать.
+// Translates a DebuggerWorker::Submit result into a protocol error code and
+// message. Returns true if the task ran and the result can be used.
 bool TranslateSubmitResult(DebuggerWorker::SubmitResult result, ipc::ErrorCode& code, std::string& message)
 {
     switch (result)
@@ -84,17 +83,17 @@ bool TranslateSubmitResult(DebuggerWorker::SubmitResult result, ipc::ErrorCode& 
         message = "Debugger worker did not respond within the timeout";
         return false;
     default:
-        // NotRunning, Rejected, SelfSubmit — все три указывают на то, что
-        // плагин сейчас не в состоянии обслужить запрос, а не на ошибку
-        // самого запроса.
+        // NotRunning, Rejected, SelfSubmit — all three indicate that the
+        // plugin is currently unable to service the request, not that the
+        // request itself is malformed.
         code = ipc::ErrorCode::Internal;
         message = "Debugger worker is not available to process the request";
         return false;
     }
 }
 
-// Достаёт из params неотрицательное целое число. При ошибке заполняет error
-// английским текстом с именем параметра.
+// Extracts a non-negative integer from params. On error, fills error with an
+// English message naming the parameter.
 bool GetUint64Param(const nlohmann::json& params, const char* name, unsigned long long& out, std::string& error)
 {
     if (!params.is_object() || !params.contains(name))
@@ -123,8 +122,8 @@ bool GetUint64Param(const nlohmann::json& params, const char* name, unsigned lon
     return true;
 }
 
-// Достаёт из params необязательное целое число. Отсутствие параметра —
-// не ошибка, подставляется defaultValue.
+// Extracts an optional integer from params. A missing parameter is not an
+// error, defaultValue is used instead.
 bool GetOptionalIntParam(const nlohmann::json& params, const char* name, int defaultValue, int& out, std::string& error)
 {
     if (!params.is_object() || !params.contains(name))
@@ -141,8 +140,8 @@ bool GetOptionalIntParam(const nlohmann::json& params, const char* name, int def
     return true;
 }
 
-// Достаёт из params необязательное булево значение. Отсутствие параметра —
-// не ошибка, подставляется defaultValue.
+// Extracts an optional boolean from params. A missing parameter is not an
+// error, defaultValue is used instead.
 bool GetOptionalBoolParam(const nlohmann::json& params, const char* name, bool defaultValue, bool& out, std::string& error)
 {
     if (!params.is_object() || !params.contains(name))
@@ -159,7 +158,7 @@ bool GetOptionalBoolParam(const nlohmann::json& params, const char* name, bool d
     return true;
 }
 
-// Достаёт из params обязательную строку.
+// Extracts a required string from params.
 bool GetRequiredStringParam(const nlohmann::json& params, const char* name, std::string& out, std::string& error)
 {
     if (!params.is_object() || !params.contains(name) || !params[name].is_string())
@@ -196,10 +195,10 @@ nlohmann::json ControlResultToJson(const ControlResult& result)
 
 std::string HandleDebuggerStatus(DebuggerWorker& worker, const nlohmann::json& id)
 {
-    // Состояние живёт под shared_ptr, а не на стеке этой функции: при
-    // Timeout задача МОЖЕТ ещё выполняться после того, как Submit вернёт
-    // управление (см. предупреждение в worker.h), и обязана иметь куда
-    // безопасно дописать результат.
+    // The state lives behind a shared_ptr, not on this function's stack:
+    // on Timeout the task MAY still be running after Submit returns control
+    // (see the warning in worker.h), and it needs a safe place to write
+    // its result into.
     auto status = std::make_shared<DebuggerStatus>();
     const auto submitResult = worker.Submit([status] { *status = GetStatus(); }, kDefaultTimeoutMs);
 
@@ -211,8 +210,8 @@ std::string HandleDebuggerStatus(DebuggerWorker& worker, const nlohmann::json& i
     return BuildOkResponse(id, StatusToJson(*status));
 }
 
-// Разделяемый результат операции с памятью/дизассемблированием. См.
-// комментарий в HandleDebuggerStatus о причине использования shared_ptr.
+// Shared result of a memory/disassembly operation. See the comment in
+// HandleDebuggerStatus for why shared_ptr is used.
 struct ReadMemoryResult
 {
     bool ok = false;
@@ -293,8 +292,8 @@ std::string HandleDisasm(DebuggerWorker& worker, const nlohmann::json& id, const
     return BuildOkResponse(id, response);
 }
 
-// Разделяемый результат операции, меняющей состояние выполнения. См.
-// комментарий в HandleDebuggerStatus о причине использования shared_ptr.
+// Shared result of an operation that changes execution state. See the
+// comment in HandleDebuggerStatus for why shared_ptr is used.
 struct ControlOutcome
 {
     bool ok = false;
@@ -401,8 +400,8 @@ std::string HandleDebugWait(DebuggerWorker& worker, const nlohmann::json& id, co
     return BuildOkResponse(id, ControlResultToJson(outcome->result));
 }
 
-// Разделяемый результат операции с точками останова, не связанной с
-// ожиданием паузы, поэтому таймаут постановки задачи здесь обычный.
+// Shared result of a breakpoint operation, which doesn't involve waiting
+// for a pause, so the task submission timeout here is the ordinary one.
 struct BreakpointOutcome
 {
     bool ok = false;
@@ -863,9 +862,258 @@ std::string HandleStackRead(DebuggerWorker& worker, const nlohmann::json& id, co
     return BuildOkResponse(id, result);
 }
 
-// Коллбэки состояния отладки. Исполняются в потоках отладчика x64dbg, поэтому
-// обязаны быть максимально короткими и не бросать исключений: DebugStateTracker
-// сам по себе исключений не бросает.
+struct StringReadOutcome
+{
+    bool ok = false;
+    std::string value;
+    std::string error;
+};
+
+std::string HandleStringRead(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<StringReadOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address] { outcome->ok = ReadStringAt(address, outcome->value, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["address"] = address;
+    result["string"] = outcome->value;
+    return BuildOkResponse(id, result);
+}
+
+struct ExpressionEvalOutcome
+{
+    bool ok = false;
+    EvalResult value;
+    std::string error;
+};
+
+std::string HandleExpressionEval(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string expression;
+    std::string paramError;
+    if (!GetRequiredStringParam(params, "expression", expression, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<ExpressionEvalOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, expression] { outcome->ok = EvaluateExpression(expression, outcome->value, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["expression"] = expression;
+    result["value"] = outcome->value.value;
+    result["pointerValid"] = outcome->value.pointerValid;
+    return BuildOkResponse(id, result);
+}
+
+struct PatternFindOutcome
+{
+    bool ok = false;
+    std::vector<unsigned long long> matches;
+    bool truncated = false;
+    std::string error;
+};
+
+std::string HandlePatternFind(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string paramError;
+    std::string pattern;
+    if (!GetRequiredStringParam(params, "pattern", pattern, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    const bool hasModule = params.is_object() && params.contains("module");
+    const bool hasRange = params.is_object() && params.contains("start") && params.contains("size");
+    if (hasModule == hasRange)
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument,
+            "Provide either parameter \"module\" or both \"start\" and \"size\", but not both");
+
+    std::string moduleName;
+    unsigned long long start = 0, size = 0;
+    if (hasModule)
+    {
+        if (!GetRequiredStringParam(params, "module", moduleName, paramError))
+            return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+    }
+    else if (!GetUint64Param(params, "start", start, paramError) ||
+             !GetUint64Param(params, "size", size, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    int maxResults = 32;
+    if (!GetOptionalIntParam(params, "max_results", 32, maxResults, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+    if (maxResults < 1)
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, "Parameter \"max_results\" must be greater than zero");
+
+    auto outcome = std::make_shared<PatternFindOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, pattern, hasModule, moduleName, start, size, maxResults]
+        {
+            unsigned long long rangeStart = start;
+            unsigned long long rangeSize = size;
+            if (hasModule)
+            {
+                ModuleDetails details;
+                std::string moduleError;
+                if (!GetModuleDetails(moduleName, 0, false, false, false, details, moduleError))
+                {
+                    outcome->ok = false;
+                    outcome->error = moduleError;
+                    return;
+                }
+                rangeStart = details.module.base;
+                rangeSize = details.module.size;
+            }
+            outcome->ok = FindPattern(rangeStart, rangeSize, pattern, static_cast<size_t>(maxResults),
+                outcome->matches, outcome->truncated, outcome->error);
+        },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["matches"] = outcome->matches;
+    result["truncated"] = outcome->truncated;
+    return BuildOkResponse(id, result);
+}
+
+struct XrefsOutcome
+{
+    bool ok = false;
+    std::vector<XrefEntry> xrefs;
+    std::string error;
+};
+
+std::string HandleXrefsGet(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<XrefsOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address] { outcome->ok = GetXrefs(address, outcome->xrefs, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json xrefs = nlohmann::json::array();
+    for (const auto& xref : outcome->xrefs)
+    {
+        nlohmann::json item;
+        item["address"] = xref.address;
+        item["type"] = xref.type;
+        xrefs.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["address"] = address;
+    result["xrefs"] = xrefs;
+    return BuildOkResponse(id, result);
+}
+
+struct FunctionDisasmOutcome
+{
+    bool ok = false;
+    unsigned long long start = 0, end = 0;
+    std::vector<Instruction> instructions;
+    bool truncated = false;
+    std::string error;
+};
+
+std::string HandleFunctionDisasm(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<FunctionDisasmOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address]
+        {
+            if (!GetFunctionRange(address, outcome->start, outcome->end, outcome->error))
+                return;
+
+            std::vector<Instruction> all;
+            if (!Disassemble(outcome->start, kMaxInstructions, all, outcome->error))
+                return;
+
+            for (const auto& instr : all)
+            {
+                if (instr.address >= outcome->end)
+                    break;
+                outcome->instructions.push_back(instr);
+            }
+            // The instruction limit was hit before the end of the function —
+            // the whole disassembled set made it into the result, but fell short of end.
+            if (outcome->instructions.size() == all.size() && !all.empty() &&
+                all.back().address + all.back().size < outcome->end)
+                outcome->truncated = true;
+
+            outcome->ok = true;
+        },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json instructions = nlohmann::json::array();
+    for (const auto& instr : outcome->instructions)
+    {
+        nlohmann::json item;
+        item["address"] = instr.address;
+        item["size"] = instr.size;
+        item["text"] = instr.text;
+        item["bytes"] = BytesToHex(instr.bytes);
+        instructions.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["start"] = outcome->start;
+    result["end"] = outcome->end;
+    result["instructions"] = instructions;
+    result["truncated"] = outcome->truncated;
+    return BuildOkResponse(id, result);
+}
+
+// Debug state callbacks. Run on x64dbg's own debugger threads, so they must
+// be as short as possible and never throw: DebugStateTracker itself never throws.
 void CbInitDebug(CBTYPE, void*) { McpService::Instance().Tracker().NotifyDebugStarted(); }
 void CbCreateProcess(CBTYPE, void*) { McpService::Instance().Tracker().NotifyDebugStarted(); }
 void CbStopDebug(CBTYPE, void*) { McpService::Instance().Tracker().NotifyDebugStopped(); }
@@ -897,10 +1145,11 @@ bool McpService::Start()
     if (pipeServer_.Start(ipc::kDefaultPipeName, handler))
         return true;
 
-    // Основное имя канала может быть занято другим уже работающим экземпляром
-    // этого же плагина (например, второй запущенный x64dbg). Вместо отказа
-    // пробуем запасное имя с PID этого процесса — второй экземпляр сможет
-    // работать одновременно, просто мосту нужно будет явно указать это имя.
+    // The default pipe name may be taken by another already-running instance
+    // of this same plugin (e.g. a second x64dbg instance). Instead of
+    // failing, try a fallback name with this process's PID — the second
+    // instance can then run at the same time, the bridge just needs to be
+    // told this name explicitly.
     const std::string fallbackName =
         std::string(ipc::kDefaultPipeName) + "-" + std::to_string(GetCurrentProcessId());
     if (pipeServer_.Start(fallbackName, handler))
@@ -916,17 +1165,17 @@ bool McpService::Start()
 
 void McpService::Stop()
 {
-    // Порядок остановки строго такой:
-    // 1) Tracker().Shutdown() — будит всех, кто ждёт паузу через
-    //    WaitForPauseAfter; иначе они провисят до собственного таймаута,
-    //    хотя плагин уже выгружается.
-    // 2) PipeServer::Stop() — прекращает приём новых запросов и будит потоки
-    //    соединений, поэтому новые задачи в очередь воркера больше не
-    //    поступают.
-    // 3) DebuggerWorker::Stop() — останавливает исполнителя последним.
-    // Обратный порядок означает, что Stop() воркера дождётся текущей задачи,
-    // а та может ждать паузы отладчика — и провисит до собственного
-    // таймаута, задержав тем самым выгрузку плагина на всё это время.
+    // The shutdown order is strictly this:
+    // 1) Tracker().Shutdown() — wakes up everyone waiting for a pause via
+    //    WaitForPauseAfter; otherwise they would hang until their own
+    //    timeout, even though the plugin is already unloading.
+    // 2) PipeServer::Stop() — stops accepting new requests and wakes up the
+    //    connection threads, so no new tasks are submitted to the worker
+    //    queue anymore.
+    // 3) DebuggerWorker::Stop() — stops the executor last.
+    // The reverse order would mean the worker's Stop() waits for the current
+    // task, which may itself be waiting for a debugger pause — hanging until
+    // its own timeout and delaying the plugin unload for that whole time.
     tracker_.Shutdown();
     pipeServer_.Stop();
     worker_.Stop();
@@ -988,6 +1237,16 @@ std::string McpService::HandleRequest(const std::string& request)
         return HandleCallStack(worker_, id, params);
     if (method == "stack.read")
         return HandleStackRead(worker_, id, params);
+    if (method == "string.read")
+        return HandleStringRead(worker_, id, params);
+    if (method == "expression.eval")
+        return HandleExpressionEval(worker_, id, params);
+    if (method == "pattern.find")
+        return HandlePatternFind(worker_, id, params);
+    if (method == "xrefs.get")
+        return HandleXrefsGet(worker_, id, params);
+    if (method == "function.disasm")
+        return HandleFunctionDisasm(worker_, id, params);
 
     return BuildErrorResponse(id, ipc::ErrorCode::UnknownMethod, "Unknown method: " + method);
 }

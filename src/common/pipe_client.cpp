@@ -11,13 +11,13 @@ namespace x64dbg_mcp
 namespace
 {
 
-// Размер внутреннего буфера чтения. Совпадает с тем, что использует
-// PipeServer — оба выбраны из одних и тех же соображений.
+// Size of the internal read buffer. Matches what PipeServer uses — both are
+// chosen for the same reasons.
 constexpr DWORD kIoBufferSize = 64u * 1024u;
 
-// Названия полей кадра рукопожатия версии протокола — приватный контракт
-// между PipeClient и PipeServer (см. дефект 3 в ревью и одноимённый
-// комментарий в pipe_server.cpp). При изменении менять оба места.
+// Field names of the protocol version handshake frame — a private contract
+// between PipeClient and PipeServer (see defect 3 in the review and the
+// matching comment in pipe_server.cpp). If you change these, change both places.
 constexpr const char* kFieldProtocolVersion = "protocolVersion";
 constexpr const char* kFieldMajor = "major";
 constexpr const char* kFieldMinor = "minor";
@@ -51,7 +51,7 @@ bool PipeClient::Connect(const std::string& pipeName, int timeoutMs)
         SetError("Failed to create a synchronization event");
         return false;
     }
-    ResetEvent(abortEvent_); // на случай повторного подключения после Disconnect()
+    ResetEvent(abortEvent_); // in case of reconnecting after Disconnect()
 
     const ULONGLONG deadline = GetTickCount64() + static_cast<ULONGLONG>((std::max)(timeoutMs, 0));
 
@@ -75,7 +75,7 @@ bool PipeClient::Connect(const std::string& pipeName, int timeoutMs)
             const int handshakeTimeoutMs = static_cast<int>((now < deadline) ? (deadline - now) : 0);
             if (!PerformHandshake(handshakeTimeoutMs))
             {
-                ClosePipe(); // lastError_ уже установлен внутри PerformHandshake
+                ClosePipe(); // lastError_ has already been set inside PerformHandshake
                 return false;
             }
             return true;
@@ -94,7 +94,7 @@ bool PipeClient::Connect(const std::string& pipeName, int timeoutMs)
             return false;
         }
 
-        // Канал существует, но занят другим клиентом — ждём своей очереди.
+        // The pipe exists but is busy with another client — wait our turn.
         const ULONGLONG now = GetTickCount64();
         if (now >= deadline)
         {
@@ -112,13 +112,13 @@ bool PipeClient::Connect(const std::string& pipeName, int timeoutMs)
             return false;
         }
 
-        // Канал освободился — повторяем попытку подключения.
+        // The pipe freed up — retry the connection attempt.
     }
 }
 
-// Дефект 3: рукопожатие версии протокола, выполняется прозрачно внутри
-// Connect(). Клиент заявляет свою версию первым кадром, сервер отвечает
-// своей; при расхождении мажорных версий соединение непригодно.
+// Defect 3: protocol version handshake, performed transparently inside
+// Connect(). The client advertises its own version in the first frame, the
+// server replies with its own; if the major versions differ, the connection is unusable.
 bool PipeClient::PerformHandshake(int timeoutMs)
 {
     const int major = (protocolMajorOverride_ >= 0) ? protocolMajorOverride_ : ipc::kProtocolVersionMajor;
@@ -140,7 +140,7 @@ bool PipeClient::PerformHandshake(int timeoutMs)
 
     const ULONGLONG deadline = GetTickCount64() + static_cast<ULONGLONG>((std::max)(timeoutMs, 0));
     if (!WriteAll(frame, deadline))
-        return false; // lastError_ уже установлен внутри WriteAll
+        return false; // lastError_ has already been set inside WriteAll
 
     FrameReader reader;
     std::string chunk(kIoBufferSize, '\0');
@@ -164,10 +164,10 @@ bool PipeClient::PerformHandshake(int timeoutMs)
             return false;
         }
         if (r != IoResult::Ok)
-            return false; // lastError_ уже установлен внутри ReadBytes
+            return false; // lastError_ has already been set inside ReadBytes
 
         if (transferred == 0)
-            return false; // риск 7: не крутим цикл при нулевом прогрессе чтения
+            return false; // risk 7: do not spin the loop on zero read progress
 
         if (reader.Feed(chunk.data(), transferred) == FrameReader::Status::Overflow)
         {
@@ -204,10 +204,9 @@ bool PipeClient::PerformHandshake(int timeoutMs)
 
 void PipeClient::Disconnect()
 {
-    // Риск 9: взводим событие прерывания без блокировки. Если SendRequest
-    // сейчас удерживает mutex_ в ожидании ввода-вывода, он проснётся и
-    // отпустит блокировку почти сразу, не дожидаясь истечения своего
-    // таймаута.
+    // Risk 9: signal the abort event without holding the lock. If SendRequest
+    // is currently holding mutex_ while waiting on I/O, it will wake up and
+    // release the lock almost immediately, without waiting out its own timeout.
     if (abortEvent_)
         SetEvent(abortEvent_);
 
@@ -263,7 +262,7 @@ bool PipeClient::SendRequest(const std::string& request, std::string& response, 
     if (!WriteAll(frame, deadline))
     {
         ClosePipe();
-        return false; // lastError_ уже установлен внутри WriteAll
+        return false; // lastError_ has already been set inside WriteAll
     }
 
     FrameReader reader;
@@ -291,7 +290,7 @@ bool PipeClient::SendRequest(const std::string& request, std::string& response, 
         }
         if (r != IoResult::Ok)
         {
-            ClosePipe(); // lastError_ уже установлен внутри ReadBytes
+            ClosePipe(); // lastError_ has already been set inside ReadBytes
             return false;
         }
 
@@ -299,7 +298,7 @@ bool PipeClient::SendRequest(const std::string& request, std::string& response, 
         {
             SetError("Read from the pipe made no progress");
             ClosePipe();
-            return false; // риск 7: не крутим цикл при нулевом прогрессе чтения
+            return false; // risk 7: do not spin the loop on zero read progress
         }
 
         if (reader.Feed(chunk.data(), transferred) == FrameReader::Status::Overflow)
@@ -319,9 +318,8 @@ bool PipeClient::SendRequest(const std::string& request, std::string& response, 
 
 PipeClient::IoResult PipeClient::WaitForIo(OVERLAPPED& ov, DWORD& transferred, int timeoutMs, const char* verb)
 {
-    // Риск 9: ждём одновременно завершения операции и события прерывания —
-    // Disconnect() может взвести его в любой момент, не дожидаясь нашего
-    // таймаута.
+    // Risk 9: wait on both the operation completing and the abort event —
+    // Disconnect() may signal it at any moment, without waiting out our timeout.
     HANDLE waitHandles[2] = { ov.hEvent, abortEvent_ };
     const DWORD wr = WaitForMultipleObjects(2, waitHandles, FALSE, static_cast<DWORD>((std::max)(timeoutMs, 0)));
 
@@ -336,18 +334,18 @@ PipeClient::IoResult PipeClient::WaitForIo(OVERLAPPED& ov, DWORD& transferred, i
 
     if (wr == WAIT_OBJECT_0 + 1)
     {
-        // Прервано через Disconnect(). Отменяем операцию и дожидаемся её
-        // фактического завершения по тем же причинам, что и при таймауте
-        // ниже: OVERLAPPED находится на стеке вызывающего.
+        // Interrupted via Disconnect(). Cancel the operation and wait for it
+        // to actually finish, for the same reason as the timeout case
+        // below: the OVERLAPPED lives on the stack of the caller.
         CancelIoEx(hPipe_, &ov);
         GetOverlappedResult(hPipe_, &ov, &transferred, TRUE);
         SetError("Operation aborted: Disconnect() was called");
         return IoResult::Aborted;
     }
 
-    // Таймаут (или сбой ожидания) — отменяем операцию и дожидаемся её
-    // фактического завершения, иначе OVERLAPPED на стеке разрушится раньше,
-    // чем ОС перестанет с ней работать.
+    // Timeout (or a failed wait) — cancel the operation and wait for it to
+    // actually finish, otherwise the stack-allocated OVERLAPPED would be
+    // destroyed before the OS is done writing to it.
     CancelIoEx(hPipe_, &ov);
     GetOverlappedResult(hPipe_, &ov, &transferred, TRUE);
     return IoResult::TimedOut;
@@ -455,7 +453,7 @@ bool PipeClient::WriteAll(const std::string& data, unsigned long long deadlineTi
             return false;
         }
         if (r != IoResult::Ok)
-            return false; // lastError_ уже установлен внутри WriteBytes
+            return false; // lastError_ has already been set inside WriteBytes
 
         if (chunkWritten == 0)
         {

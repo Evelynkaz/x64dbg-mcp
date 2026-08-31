@@ -40,8 +40,8 @@ bool ParseLogLevel(const std::string& value, LogLevel& out)
 
 int main(int argc, char** argv)
 {
-    // Любое исключение обязано быть перехвачено здесь: это точка входа
-    // процесса, и её падение означает аварийное завершение сервера.
+    // Any exception must be caught here: this is the process entry point,
+    // and letting it fall through would mean the server crashing.
     try
     {
         LogLevel level = LogLevel::Info;

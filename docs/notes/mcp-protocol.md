@@ -1,34 +1,34 @@
-# Заметка: спецификация MCP и требования к серверу
+# Note: MCP specification and server requirements
 
-Источник: `https://modelcontextprotocol.io/specification/2026-07-28`, проверено 2026-08-30.
+Source: `https://modelcontextprotocol.io/specification/2026-07-28`, checked 2026-08-30.
 
-## Две эры протокола
+## Two protocol eras
 
-- **Современная (modern)**: ревизия `2026-07-28` и новее. Протокол объявлен stateless, рукопожатия нет, версия и возможности передаются в каждом запросе.
-- **Устаревшая (legacy)**: `2025-11-25` и раньше. Сессия устанавливается запросом `initialize`.
-- **Двухэровая (dual-era)** реализация поддерживает обе. Наш сервер обязан быть двухэровым: современные клиенты работают по новой модели, уже существующие — по `initialize`.
+- **Modern**: revision `2026-07-28` and newer. The protocol is declared stateless, there is no handshake, and version/capabilities are sent with every request.
+- **Legacy**: `2025-11-25` and older. A session is established with an `initialize` request.
+- **Dual-era** implementation supports both. Our server must be dual-era: modern clients work against the new model, existing ones against `initialize`.
 
-## Обязательные поля современного запроса
+## Required fields of a modern request
 
-Поля живут в `params._meta`:
+The fields live under `params._meta`:
 
-| Ключ | Тип | Обязателен |
+| Key | Type | Required |
 |---|---|---|
-| `io.modelcontextprotocol/protocolVersion` | string | да |
-| `io.modelcontextprotocol/clientCapabilities` | ClientCapabilities | да |
-| `io.modelcontextprotocol/clientInfo` | Implementation | нет |
-| `io.modelcontextprotocol/logLevel` | LoggingLevel | нет |
+| `io.modelcontextprotocol/protocolVersion` | string | yes |
+| `io.modelcontextprotocol/clientCapabilities` | ClientCapabilities | yes |
+| `io.modelcontextprotocol/clientInfo` | Implementation | no |
+| `io.modelcontextprotocol/logLevel` | LoggingLevel | no |
 
-Запрос без обязательного поля считается некорректным, сервер обязан ответить ошибкой `-32602`.
-В ответах сервер должен класть `_meta["io.modelcontextprotocol/serverInfo"]`.
+A request missing a required field is invalid; the server must respond with error `-32602`.
+Responses from the server must include `_meta["io.modelcontextprotocol/serverInfo"]`.
 
 ## resultType
 
-Каждый результат обязан содержать поле `resultType`. Значение `"complete"` — запрос выполнен, результат окончательный. Значение `"input_required"` — требуется дополнительный ввод. Отсутствие поля клиент трактует как `"complete"` (совместимость со старыми серверами).
+Every result must contain a `resultType` field. `"complete"` means the request finished and the result is final. `"input_required"` means additional input is needed. If the field is absent, the client treats it as `"complete"` (for compatibility with older servers).
 
 ## server/discover
 
-Сервер обязан реализовать метод `server/discover`. Пример запроса:
+The server must implement the `server/discover` method. Example request:
 
 ```json
 { "jsonrpc": "2.0", "id": "discover-1", "method": "server/discover",
@@ -38,7 +38,7 @@
     "io.modelcontextprotocol/clientCapabilities": {} } } }
 ```
 
-Пример ответа:
+Example response:
 
 ```json
 { "jsonrpc": "2.0", "id": "discover-1", "result": {
@@ -51,44 +51,44 @@
     "cacheScope": "public" } }
 ```
 
-`server/discover` служит клиенту ещё и пробой для определения эры сервера на stdio.
+`server/discover` also serves as a probe the client uses on stdio to determine which era the server implements.
 
-## Ошибки версии
+## Version errors
 
-Если сервер не поддерживает запрошенную версию, он обязан вернуть код `-32022` со списком поддерживаемых:
+If the server does not support the requested version, it must return code `-32022` with the list of supported versions:
 
 ```json
 { "jsonrpc": "2.0", "id": 1, "error": { "code": -32022, "message": "Unsupported protocol version",
   "data": { "supported": ["2026-07-28", "2025-11-25"], "requested": "1900-01-01" } } }
 ```
 
-Другие коды, определённые спецификацией: `-32020` HeaderMismatch, `-32021` MissingRequiredClientCapability.
-Диапазон `-32020`..`-32099` зарезервирован спецификацией — свои коды туда класть нельзя. Диапазон `-32000`..`-32019` объявлен устаревшим, новые реализации его использовать не должны. Собственные коды следует размещать вне зарезервированного диапазона `-32768`..`-32000`.
+Other codes defined by the spec: `-32020` HeaderMismatch, `-32021` MissingRequiredClientCapability.
+The range `-32020`..`-32099` is reserved by the specification; custom codes must not be placed there. The range `-32000`..`-32019` is declared legacy, and new implementations should not use it. Custom codes should be placed outside the reserved range `-32768`..`-32000`.
 
-Отдельно: сервер, поддерживающий только современные версии, должен назвать поддерживаемые версии в тексте ошибки на `initialize`, поскольку у устаревших клиентов нет механизма перехода вперёд.
+Separately: a server that supports only modern versions must list the supported versions in the error text returned for `initialize`, since legacy clients have no mechanism for negotiating forward.
 
-## Правила stdio
+## stdio rules
 
-- Клиент запускает сервер как дочерний процесс.
-- Одно сообщение — одна строка; переводы строк внутри сообщения запрещены; кодировка UTF-8.
-- В `stdout` не должно попадать ничего, кроме корректных сообщений MCP. Это жёсткое требование: любая отладочная печать в stdout ломает транспорт.
-- В `stderr` можно писать произвольные journal-сообщения; клиент не обязан считать их признаком ошибки.
-- Сервер не отправляет JSON-RPC запросы клиенту.
-- Отмена запроса — уведомление `notifications/cancelled` со ссылкой на идентификатор запроса; сервер должен прекратить работу и больше не слать сообщений по этому запросу.
-- Завершение: клиент закрывает stdin; сервер должен завершиться сразу при получении EOF на stdin. Это основной и единственный переносимый сигнал корректного завершения.
-- При неожиданном падении сервера клиент перезапускает процесс; выполнявшиеся запросы просто теряются.
+- The client launches the server as a child process.
+- One message per line; newlines inside a message are forbidden; encoding is UTF-8.
+- Nothing but valid MCP messages may appear on `stdout`. This is a hard requirement: any debug print to stdout breaks the transport.
+- Arbitrary journal messages can be written to `stderr`; the client is not required to treat them as an error indicator.
+- The server does not send JSON-RPC requests to the client.
+- Cancelling a request is done via the `notifications/cancelled` notification referencing the request id; the server must stop working on it and send no further messages for that request.
+- Termination: the client closes stdin; the server must exit immediately on receiving EOF on stdin. This is the primary and only portable signal for graceful shutdown.
+- If the server crashes unexpectedly, the client restarts the process; any in-flight requests are simply lost.
 
-## Схемы JSON
+## JSON Schemas
 
-Схемы по умолчанию трактуются как JSON Schema 2020-12, если не указан `$schema`. Рекомендуется использовать именно 2020-12.
+Schemas are treated as JSON Schema 2020-12 by default when `$schema` is not specified. Using 2020-12 explicitly is recommended.
 
-## Что реально шлёт клиент: проверено экспериментом
+## What the client actually sends: verified by experiment
 
-Проверено 2026-08-30 на Claude Code версии 2.1.251 (это новее версии 2.1.232, начиная с которой включается рантайм с поддержкой ревизии 2026-07-28).
+Verified on 2026-08-30 against Claude Code version 2.1.251 (newer than 2.1.232, the version starting from which the runtime supporting the 2026-07-28 revision is enabled).
 
-Методика: локально зарегистрирован stdio-сервер-заглушка, умеющий отвечать и по современной, и по устаревшей модели; записаны все сообщения, полученные от клиента.
+Method: a local stdio stub server was registered, capable of responding under both the modern and legacy models; all messages received from the client were logged.
 
-Первым сообщением пришло:
+The first message received was:
 
 ```json
 {"method":"initialize",
@@ -98,20 +98,20 @@
  "jsonrpc":"2.0","id":0}
 ```
 
-Далее — уведомление `notifications/initialized`, затем запрос `tools/list`.
+Next came the `notifications/initialized` notification, followed by a `tools/list` request.
 
-Запроса `server/discover` не поступало.
+No `server/discover` request was ever received.
 
-Вывод: для локальных stdio-серверов Claude Code на момент проверки использует устаревшую модель с рукопожатием `initialize` и версией `2025-11-25`. Современную ревизию клиент согласовывает с серверами по HTTP и с коннекторами, но не с локальными stdio-серверами.
+Conclusion: as of this check, Claude Code uses the legacy model with an `initialize` handshake and version `2025-11-25` for local stdio servers. It negotiates the modern revision with servers over HTTP and with connectors, but not with local stdio servers.
 
-Практическое следствие: поддержка устаревшей модели обязательна, иначе сервер не подключится вообще. Поддержка современной модели добавляется одновременно, чтобы проект не потребовал переделки при обновлении клиентов. Проверку следует повторить при выходе новых версий клиента.
+Practical consequence: supporting the legacy model is mandatory, or the server won't connect at all. Support for the modern model is added at the same time, so the project won't need rework once clients are updated. This check should be repeated whenever new client versions are released.
 
-## Выводы для нашей реализации
+## Conclusions for our implementation
 
-- Сервер двухэровый: обрабатывает и `initialize`, и современные запросы с `_meta`.
-- Реализовать `server/discover`.
-- Во все результаты класть `resultType: "complete"` и `serverInfo` в `_meta`.
-- Ни одна диагностика не пишется в stdout; весь журнал — в stderr и в файл.
-- Обрабатывать `notifications/cancelled`.
-- Завершаться по EOF на stdin.
-- Коды ошибок брать вне зарезервированного диапазона, кроме определённых спецификацией.
+- The server is dual-era: it handles both `initialize` and modern requests carrying `_meta`.
+- Implement `server/discover`.
+- Put `resultType: "complete"` and `serverInfo` in `_meta` on every result.
+- No diagnostics are ever written to stdout; all logging goes to stderr and to a file.
+- Handle `notifications/cancelled`.
+- Exit on EOF on stdin.
+- Pick error codes outside the reserved range, except for the codes defined by the spec.

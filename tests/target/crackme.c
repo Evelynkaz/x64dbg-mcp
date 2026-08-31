@@ -1,42 +1,42 @@
 // crackme.c
-// Подопытная программа для ручной проверки инструментов MCP-сервера x64dbg.
-// У каждой "мишени" ниже заранее известный правильный ответ -
-// сверять с ним нужно в tests/target/README.md.
+// A test subject program for manually verifying the x64dbg MCP server tools.
+// Each "target" below has a known correct answer in advance -
+// compare against it using tests/target/README.md.
 
-// Сознательное подавление предупреждений CRT о "небезопасных" функциях:
-// strcmp тут безопасен по построению (обе строки завершены нулём),
-// а sprintf/strcpy в этом файле вообще не используются.
+// Deliberate suppression of CRT warnings about "unsafe" functions:
+// strcmp is safe here by construction (both strings are null-terminated),
+// and sprintf/strcpy aren't used in this file at all.
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
 
-// --- 1. Строки для проверки чтения памяти и поиска ссылок на строки ---
+// --- 1. Strings for testing memory reads and string reference searches ---
 static const char g_ascii_string[] = "X64DBG_MCP_TEST_ASCII_STRING";
 static const wchar_t g_wide_string[] = L"X64DBG_MCP_TEST_WIDE_STRING";
 
-// --- 2. Байтовый маркер для проверки поиска по сигнатуре ---
-// Значение заведомо не встречается в обычном коде компилятора.
+// --- 2. Byte marker for testing signature (byte pattern) search ---
+// The value is deliberately not something that appears in ordinary compiler-generated code.
 volatile unsigned char g_pattern_marker[16] = {
     0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
     0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0
 };
 
-// --- 4. Глобальные переменные с известными значениями для проверки памяти ---
+// --- 4. Global variables with known values for testing memory access ---
 volatile int g_magic = 0x1337;
 volatile int g_counter = 0;
 
-// Счётчик рабочего потока растёт независимо от g_counter - поток легко узнать.
+// The worker thread's counter grows independently of g_counter - the thread is easy to identify.
 volatile int g_thread_counter = 0;
 
 static const char PASSWORD[] = "s3cr3t";
 
-// --- 3. Именованные экспортируемые функции ---
-// dllexport кладёт имя в таблицу экспорта, чтобы x64dbg видел его без PDB.
-// noinline не даёт компилятору растворить функцию в месте вызова.
+// --- 3. Named exported functions ---
+// dllexport puts the name in the export table so x64dbg can see it without a PDB.
+// noinline stops the compiler from inlining the function at the call site.
 
-// Сравнивает вход с паролем. Условный переход внутри - мишень для патча.
+// Compares the input against the password. The conditional jump inside is a patch target.
 __declspec(dllexport) __declspec(noinline) int check_password(const char* input)
 {
     if (strcmp(input, PASSWORD) == 0)
@@ -46,7 +46,7 @@ __declspec(dllexport) __declspec(noinline) int check_password(const char* input)
     return 0;
 }
 
-// Простая контрольная сумма по байтам буфера - мишень для разбора цикла.
+// A simple byte-wise checksum over a buffer - a target for loop analysis.
 __declspec(dllexport) __declspec(noinline) unsigned int compute_checksum(const unsigned char* data, int len)
 {
     unsigned int sum = 0;
@@ -58,7 +58,7 @@ __declspec(dllexport) __declspec(noinline) unsigned int compute_checksum(const u
     return sum;
 }
 
-// Циклический XOR - мишень для разбора простого преобразования данных.
+// A repeating XOR - a target for analyzing a simple data transformation.
 __declspec(dllexport) __declspec(noinline) void xor_decrypt(unsigned char* buf, int len, unsigned char key)
 {
     int i;
@@ -68,20 +68,20 @@ __declspec(dllexport) __declspec(noinline) void xor_decrypt(unsigned char* buf, 
     }
 }
 
-// Простое сложение - мишень для проверки изменения регистров/аргументов.
+// A simple addition - a target for testing register/argument modification.
 __declspec(dllexport) __declspec(noinline) int target_function(int a, int b)
 {
     return a + b;
 }
 
-// --- 6. Рабочий поток для проверки списка потоков и регистров чужого потока ---
+// --- 6. Worker thread for testing the thread list and another thread's registers ---
 static DWORD WINAPI worker_thread(LPVOID param)
 {
     (void)param;
     for (;;)
     {
         g_thread_counter++;
-        // Период отличается от главного потока (500 мс), поток легко узнать.
+        // The period differs from the main thread's (500 ms), making the thread easy to identify.
         Sleep(750);
     }
 }
@@ -98,7 +98,7 @@ int main(void)
     HANDLE thread_handle;
     int iteration = 0;
 
-    // --- 5. Однократные вызовы WinAPI, чтобы их имена попали в таблицу импорта ---
+    // --- 5. One-time WinAPI calls so their names land in the import table ---
     tick_count = GetTickCount();
     GetModuleFileNameW(NULL, module_path, MAX_PATH);
     self_file = CreateFileW(module_path, GENERIC_READ, FILE_SHARE_READ, NULL,
@@ -108,11 +108,11 @@ int main(void)
         CloseHandle(self_file);
     }
 
-    // --- 1. Печать строк, чтобы компоновщик их не выбросил ---
+    // --- 1. Print the strings so the linker doesn't discard them ---
     printf("ASCII string: %s\n", g_ascii_string);
     printf("Wide string: %ls\n", g_wide_string);
 
-    // --- 2. Использование байтового маркера, чтобы не был выброшен ---
+    // --- 2. Use the byte marker so it isn't discarded ---
     marker_sum = 0;
     for (i = 0; i < 16; i++)
     {
@@ -120,7 +120,7 @@ int main(void)
     }
     printf("Pattern marker checksum: %u\n", marker_sum);
 
-    // --- 8. Опорные сведения при старте: сверяются с ответами инструментов MCP ---
+    // --- 8. Reference values at startup: compared against MCP tool responses ---
     pid = GetCurrentProcessId();
     base = GetModuleHandle(NULL);
     printf("PID: %lu\n", pid);
@@ -132,14 +132,14 @@ int main(void)
     printf("Address of target_function: %p\n", (void*)target_function);
     fflush(stdout);
 
-    // --- 6. Запуск рабочего потока ---
+    // --- 6. Start the worker thread ---
     thread_handle = CreateThread(NULL, 0, worker_thread, NULL, 0, NULL);
     if (thread_handle != NULL)
     {
         CloseHandle(thread_handle);
     }
 
-    // --- Основной цикл: демонстрация памяти, пароля и потока ---
+    // --- Main loop: demonstrates memory, the password, and the thread ---
     for (;;)
     {
         int password_ok;
@@ -147,7 +147,7 @@ int main(void)
         iteration++;
         g_counter++;
 
-        // --- 7. Мишень для патча: заведомо неверный пароль ---
+        // --- 7. Patch target: deliberately wrong password ---
         password_ok = check_password("wrongpass");
 
         printf("iter=%d g_magic=0x%X counter=%d access=%s\n",

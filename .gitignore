@@ -1,7 +1,7 @@
-# Клонированные чужие исходники и SDK
+# Cloned third-party sources and SDK
 external/
 
-# Артефакты сборки
+# Build artifacts
 build/
 build*/
 out/
@@ -18,7 +18,7 @@ CMakeSettings.json
 *.sln
 *.vcxproj*
 
-# Бинарники плагина и подопытных программ
+# Plugin and target-program binaries
 *.dp64
 *.dp32
 *.exe
@@ -28,15 +28,15 @@ CMakeSettings.json
 *.exp
 *.lib
 *.obj
-# Примечание: вендоренные .lib из SDK в репозиторий не попадают вовсе
-# (SDK не вендорится, а скачивается при конфигурации CMake), поэтому
-# глобальный игнор .lib безопасен и не затрагивает версионируемые файлы.
+# Note: vendored .lib files from the SDK never enter the repository
+# (the SDK is not vendored, it is downloaded during CMake configuration),
+# so a blanket .lib ignore is safe and does not affect versioned files.
 
-# Локальные конфиги и логи
+# Local configs and logs
 *.log
 x64dbg-mcp.ini
 .env
 
-# Прочее
+# Misc
 Thumbs.db
 desktop.ini

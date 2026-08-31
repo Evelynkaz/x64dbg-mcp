@@ -17,14 +17,14 @@ namespace x64dbg_mcp
 namespace detail
 {
 
-// Разделяемое состояние работающего сервера: дескриптор канала, событие
-// остановки, обработчик запросов и признак работы. Живёт под std::shared_ptr,
-// а не как поля PipeServer, и рабочий поток захватывает свою копию shared_ptr,
-// а не указатель this (см. дефект 2 в ревью). Благодаря этому, если Stop() не
-// дождался потока в отведённый срок и отсоединяет его, состояние (включая
-// дескрипторы) остаётся живо ровно до тех пор, пока жив сам поток — обращение
-// к уже освобождённому объекту из отсоединённого потока становится
-// невозможным по конструкции, а не по соглашению.
+// Shared state of a running server: the pipe handle, the stop event, the
+// request handler, and the running flag. Lives behind a std::shared_ptr
+// rather than as fields of PipeServer, and the worker thread captures its
+// own copy of the shared_ptr rather than a raw this pointer (see defect 2 in
+// the review). Thanks to that, if Stop() fails to join the thread in time
+// and detaches it, the state (including the handles) stays alive exactly as
+// long as the thread itself does — touching an already-freed object from
+// the detached thread becomes impossible by construction, not just by convention.
 struct PipeServerState
 {
     HANDLE hPipe = INVALID_HANDLE_VALUE;
@@ -37,17 +37,16 @@ struct PipeServerState
 
 } // namespace detail
 
-// Сервер именованного канала Windows. Предназначен для работы внутри
-// процесса-плагина x64dbg, поэтому ничего не знает о самом x64dbg: он
-// принимает обработчик запросов снаружи и оперирует произвольными байтовыми
-// сообщениями. Это позволяет проверять транспорт обычным юнит-тестом, без
-// запущенного отладчика.
+// Windows named pipe server. Meant to run inside the x64dbg plugin process,
+// so it knows nothing about x64dbg itself: it takes a request handler from
+// the outside and operates on arbitrary byte messages. This lets the
+// transport be tested with an ordinary unit test, without a running debugger.
 class PipeServer
 {
 public:
-    // Обработчик запроса: получает тело запроса, возвращает тело ответа.
-    // Вызывается на потоке соединения. Не должен бросать исключений, но если
-    // всё же бросит — PipeServer перехватит исключение сам (см. .cpp).
+    // Request handler: receives the request body, returns the response body.
+    // Called on the connection thread. Should not throw, but if it does,
+    // PipeServer catches the exception itself (see the .cpp).
     using RequestHandler = std::function<std::string(const std::string& request)>;
 
     PipeServer();
@@ -56,32 +55,33 @@ public:
     PipeServer(const PipeServer&) = delete;
     PipeServer& operator=(const PipeServer&) = delete;
 
-    // Запускает сервер на указанном имени канала. Обслуживает одно
-    // соединение одновременно — мост подключается один. Если пока сервер
-    // занят первым клиентом подключается второй, его CreateFileA получит
-    // ERROR_PIPE_BUSY: он ждёт своей очереди через WaitNamedPipe и повторяет
-    // попытку (см. PipeClient::Connect) — этого достаточно для одного моста.
-    // Канал создаётся с явным дескриптором безопасности (только владелец и
-    // система) — если построить его не удалось, канал вообще не создаётся:
-    // работать с ослабленными правами доступа хуже, чем не работать (см.
-    // риск 4 в ревью — рядом может работать недоверенный отлаживаемый код).
-    // Возвращает false, если канал занят или создать его не удалось.
+    // Starts the server on the given pipe name. Serves one connection at a
+    // time — the bridge connects as a single client. If a second client
+    // tries to connect while the server is busy with the first, its
+    // CreateFileA gets ERROR_PIPE_BUSY: it waits its turn via WaitNamedPipe
+    // and retries (see PipeClient::Connect) — that is enough for a single
+    // bridge. The pipe is created with an explicit security descriptor
+    // (owner and system only) — if building that descriptor fails, the pipe
+    // is not created at all: working with weakened access rights is worse
+    // than not working (see risk 4 in the review — untrusted debuggee code
+    // could be running alongside).
+    // Returns false if the pipe is busy or could not be created.
     bool Start(const std::string& pipeName, RequestHandler handler);
 
-    // Останавливает сервер и дожидается завершения своего потока в пределах
-    // разумного времени. Взводит событие остановки и отменяет операции
-    // ввода-вывода на канале — поэтому не ждёт отключения клиента. Цикл
-    // приёма при этом завершается только по этому запросу, а не из-за штатных
-    // ошибок канала (см. дефект 1). Если поток не успел завершиться вовремя
-    // (например, застрял в стороннем обработчике запроса), Stop() отсоединяет
-    // его: сервер отпускает свою ссылку на разделяемое состояние, и поток
-    // донашивает его самостоятельно, пока не завершится (см. дефект 2).
-    // Безопасно вызывать повторно и без предшествующего Start.
+    // Stops the server and waits for its thread to finish within a
+    // reasonable time. Signals the stop event and cancels pending I/O on the
+    // pipe — so it does not wait for the client to disconnect. The accept
+    // loop only exits because of this request, never because of a routine
+    // pipe error (see defect 1). If the thread does not finish in time (for
+    // example, it is stuck inside a third-party request handler), Stop()
+    // detaches it: the server releases its own reference to the shared
+    // state, and the thread keeps it alive on its own until it finishes (see
+    // defect 2). Safe to call repeatedly and without a preceding Start.
     void Stop();
 
     bool IsRunning() const;
 
-    // Имя канала, на котором сервер фактически работает.
+    // The name of the pipe the server is actually running on.
     std::string PipeName() const;
 
 private:

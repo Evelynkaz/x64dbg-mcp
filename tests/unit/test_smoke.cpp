@@ -1,8 +1,8 @@
 #include "nlohmann/json.hpp"
 #include "doctest/doctest.h"
 
-TEST_CASE("json: round-trip объекта") {
-    // Строим объект с полями разных типов: строка, число, вложенный объект, массив.
+TEST_CASE("json: round-trip of an object") {
+    // Build an object with fields of different types: string, number, nested object, array.
     nlohmann::json original = {
         {"name", "x64dbg-mcp"},
         {"version", 1},
@@ -10,7 +10,7 @@ TEST_CASE("json: round-trip объекта") {
         {"values", {1, 2, 3}}
     };
 
-    // Сериализуем в строку и разбираем обратно.
+    // Serialize to a string and parse it back.
     const std::string text = original.dump();
     const nlohmann::json parsed = nlohmann::json::parse(text);
 
@@ -20,18 +20,18 @@ TEST_CASE("json: round-trip объекта") {
     CHECK(parsed["values"] == nlohmann::json::array({1, 2, 3}));
 }
 
-TEST_CASE("json: разбор некорректного ввода не бросает при использовании безопасного разбора") {
-    // Входные данные приходят снаружи, и разбор не должен приводить к исключению,
-    // вылетающему за пределы обработчика.
+TEST_CASE("json: parsing invalid input does not throw when using safe parsing") {
+    // Input data comes from outside, and parsing must not throw an exception
+    // that escapes the handler.
     const std::string broken = "{\"key\": ";
     const nlohmann::json result = nlohmann::json::parse(broken, nullptr, false);
 
     CHECK(result.is_discarded());
 }
 
-TEST_CASE("json: юникод и экранирование переживают round-trip") {
-    // Сообщения MCP передаются построчно, поэтому важно, что переводы строк
-    // внутри значений экранируются и не разрывают протокол на несколько строк.
+TEST_CASE("json: unicode and escaping survive a round trip") {
+    // MCP messages are transmitted line by line, so it matters that newlines
+    // inside values are escaped and do not split the protocol across multiple lines.
     const std::string original = "Привет \"мир\"\\\nновая строка";
     nlohmann::json value = original;
 

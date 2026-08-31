@@ -13,9 +13,9 @@ namespace x64dbg_mcp::bridge
 namespace
 {
 
-// Журнал пишут разные потоки (в будущем — как минимум поток stdio-цикла
-// и поток канала к плагину), поэтому доступ к состоянию и к самому stderr
-// защищён одним мьютексом.
+// The log is written from multiple threads (eventually at least the stdio
+// loop thread and the pipe-to-plugin thread), so access to the state and to
+// stderr itself is protected by a single mutex.
 std::mutex g_mutex;
 LogLevel g_minLevel = LogLevel::Info;
 
@@ -43,8 +43,8 @@ void Log(LogLevel level, const std::string& message)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
 
-    // Уровни объявлены по убыванию важности (Error=0 .. Debug=3), поэтому
-    // "менее важный, чем порог" означает "числовое значение больше".
+    // Levels are declared in decreasing order of importance (Error=0 .. Debug=3),
+    // so "less important than the threshold" means "numerically greater".
     if (static_cast<int>(level) > static_cast<int>(g_minLevel))
         return;
 

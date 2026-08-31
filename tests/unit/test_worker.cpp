@@ -10,7 +10,7 @@
 
 using x64dbg_mcp::plugin::DebuggerWorker;
 
-TEST_CASE("worker: задача выполняется, Submit возвращает Completed") {
+TEST_CASE("worker: task runs and Submit returns Completed") {
     DebuggerWorker worker;
     REQUIRE(worker.Start());
 
@@ -23,18 +23,17 @@ TEST_CASE("worker: задача выполняется, Submit возвраща�
     worker.Stop();
 }
 
-TEST_CASE("worker: задачи выполняются в порядке постановки") {
+TEST_CASE("worker: tasks run in the order they were submitted") {
     DebuggerWorker worker;
     REQUIRE(worker.Start());
 
     std::mutex mutex;
     std::vector<int> order;
 
-    // Задача-шлагбаум занимает рабочий поток, пока мы ставим в очередь
-    // остальные задачи из отдельных потоков — иначе, вызывая Submit
-    // последовательно из одного потока, мы бы просто проверяли, что
-    // предыдущая задача успела выполниться до постановки следующей, а не
-    // порядок обработки очереди.
+    // A gate task holds the worker thread while we enqueue the other tasks
+    // from separate threads — otherwise, calling Submit sequentially from a
+    // single thread would only check that the previous task finished before
+    // the next one was submitted, not the order the queue is processed in.
     std::atomic<bool> release{false};
     std::thread gateThread([&] {
         worker.Submit([&] {
@@ -43,11 +42,11 @@ TEST_CASE("worker: задачи выполняются в порядке пос�
         }, 5000);
     });
 
-    // Ждём, пока шлагбаум точно займёт рабочий поток.
+    // Wait until the gate has definitely taken over the worker thread.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    // Небольшая пауза между постановкой каждой задачи делает порядок их
-    // попадания в очередь детерминированным для теста.
+    // A small pause between submitting each task makes the order they land
+    // in the queue deterministic for the test.
     std::vector<std::thread> submitters;
     for (int i = 0; i < 4; ++i)
     {
@@ -71,7 +70,7 @@ TEST_CASE("worker: задачи выполняются в порядке пос�
     worker.Stop();
 }
 
-TEST_CASE("worker: все задачи исполняются в одном и том же потоке") {
+TEST_CASE("worker: all tasks run on the same thread") {
     DebuggerWorker worker;
     REQUIRE(worker.Start());
 
@@ -96,7 +95,7 @@ TEST_CASE("worker: все задачи исполняются в одном и �
     worker.Stop();
 }
 
-TEST_CASE("worker: задача, превысившая время, даёт Timeout, а следующие выполняются нормально") {
+TEST_CASE("worker: a task that exceeds its time gives Timeout, and later tasks run normally") {
     DebuggerWorker worker;
     REQUIRE(worker.Start());
 
@@ -107,9 +106,9 @@ TEST_CASE("worker: задача, превысившая время, даёт Tim
     }, 100);
 
     CHECK(slowResult == DebuggerWorker::SubmitResult::Timeout);
-    // Медленная задача не была прервана и продолжает исполняться — Submit
-    // о ней просто перестал ждать. Проверка владения с подсчётом ссылок:
-    // TaskCompletion пережил уход вызывающего по таймауту.
+    // The slow task wasn't interrupted and keeps running — Submit just
+    // stopped waiting for it. This checks ref-counted ownership:
+    // TaskCompletion outlived the caller leaving on timeout.
     CHECK_FALSE(slowTaskFinished.load());
 
     std::atomic<bool> nextRan{false};
@@ -117,12 +116,12 @@ TEST_CASE("worker: задача, превысившая время, даёт Tim
 
     CHECK(nextResult == DebuggerWorker::SubmitResult::Completed);
     CHECK(nextRan.load());
-    CHECK(slowTaskFinished.load()); // к этому моменту медленная задача уже доработала
+    CHECK(slowTaskFinished.load()); // by now the slow task has already finished
 
     worker.Stop();
 }
 
-TEST_CASE("worker: исключение из задачи не роняет поток") {
+TEST_CASE("worker: an exception from a task does not crash the thread") {
     DebuggerWorker worker;
     REQUIRE(worker.Start());
 
@@ -139,29 +138,30 @@ TEST_CASE("worker: исключение из задачи не роняет по
     worker.Stop();
 }
 
-TEST_CASE("worker: Submit без Start даёт NotRunning") {
+TEST_CASE("worker: Submit without Start gives NotRunning") {
     DebuggerWorker worker;
     const auto result = worker.Submit([] {}, 1000);
     CHECK(result == DebuggerWorker::SubmitResult::NotRunning);
 }
 
-TEST_CASE("worker: Stop с задачами в очереди завершается быстро и не виснет") {
+TEST_CASE("worker: Stop with queued tasks completes quickly and does not hang") {
     DebuggerWorker worker;
     REQUIRE(worker.Start());
 
-    // Первая задача реально исполняется и занимает рабочий поток на
-    // ограниченное время — Stop() обязан дождаться именно её, а не всех
-    // задач, ожидающих в очереди позади неё.
+    // The first task actually runs and occupies the worker thread for a
+    // limited time — Stop() must wait specifically for it, not for all the
+    // tasks waiting behind it in the queue.
     std::thread runningThread([&] {
         worker.Submit([] { std::this_thread::sleep_for(std::chrono::milliseconds(500)); }, 5000);
     });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    // Задачи, которые никогда не должны выполниться — если бы Stop() ждал
-    // их всех, суммарно это заняло бы больше 5 секунд. Таймаут постановки
-    // намеренно большой (5000 мс): мы проверяем, что отмена в Stop() реально
-    // будит эти потоки, а не что они сами истекли по таймауту постановки.
+    // Tasks that must never run — if Stop() waited for all of them, that
+    // would take more than 5 seconds in total. The submit timeout is
+    // deliberately large (5000 ms): we're verifying that cancellation in
+    // Stop() actually wakes these threads, not that they timed out on their
+    // own submit timeout.
     constexpr int kQueued = 5;
     std::atomic<int> queuedRan{0};
     std::vector<DebuggerWorker::SubmitResult> results(kQueued);
@@ -193,11 +193,11 @@ TEST_CASE("worker: Stop с задачами в очереди завершает
     for (auto& t : queuedThreads)
         t.join();
 
-    // Проверяем сам путь отмены, а не только его следствие: каждый
-    // поставивший задачу поток обязан получить NotRunning и уложиться
-    // существенно меньше своего пятисекундного таймаута постановки. Замена
-    // цикла отмены на простую очистку очереди оставила бы эти потоки висеть
-    // до истечения Timeout — эта проверка ловит именно такую мутацию.
+    // We check the cancellation path itself, not just its consequence: each
+    // thread that submitted a task must get NotRunning and finish well
+    // within its five-second submit timeout. Replacing the cancellation
+    // loop with a simple queue clear would leave these threads hanging
+    // until the Timeout expires — this check catches exactly that mutation.
     for (int i = 0; i < kQueued; ++i)
     {
         CHECK(results[i] == DebuggerWorker::SubmitResult::NotRunning);
@@ -205,7 +205,7 @@ TEST_CASE("worker: Stop с задачами в очереди завершает
     }
 }
 
-TEST_CASE("worker: постановка задачи изнутри задачи даёт SelfSubmit, снаружи — Completed") {
+TEST_CASE("worker: submitting a task from within a task gives SelfSubmit, from outside gives Completed") {
     DebuggerWorker worker;
     REQUIRE(worker.Start());
 
@@ -220,11 +220,11 @@ TEST_CASE("worker: постановка задачи изнутри задачи
     worker.Stop();
 }
 
-TEST_CASE("worker: задача, брошенная по таймауту в очереди, не выполняется") {
+TEST_CASE("worker: a task dropped due to queue timeout does not run") {
     DebuggerWorker worker;
     REQUIRE(worker.Start());
 
-    // Шлагбаум занимает рабочий поток, пока вторая задача ждёт в очереди.
+    // The gate occupies the worker thread while the second task waits in the queue.
     std::atomic<bool> release{false};
     std::thread gateThread([&] {
         worker.Submit([&] {
@@ -239,9 +239,10 @@ TEST_CASE("worker: задача, брошенная по таймауту в о�
     const auto abandonedResult = worker.Submit([&] { abandonedTaskRan = true; }, 200);
     CHECK(abandonedResult == DebuggerWorker::SubmitResult::Timeout);
 
-    // Освобождаем рабочий поток уже ПОСЛЕ того, как вызывающий получил
-    // Timeout, — именно этот порядок воспроизводит дефект: без пометки
-    // "брошена" рабочий поток впоследствии всё равно исполнил бы задачу.
+    // We release the worker thread only AFTER the caller has received
+    // Timeout — this exact order reproduces the defect: without the
+    // "abandoned" marker, the worker thread would still go on to run
+    // the task afterward.
     release = true;
     gateThread.join();
 
@@ -255,31 +256,31 @@ TEST_CASE("worker: задача, брошенная по таймауту в о�
     worker.Stop();
 }
 
-TEST_CASE("worker: повторные Start/Stop и Stop без Start безопасны") {
+TEST_CASE("worker: repeated Start/Stop and Stop without Start are safe") {
     DebuggerWorker worker;
-    worker.Stop(); // без предшествующего Start
+    worker.Stop(); // without a preceding Start
 
     REQUIRE(worker.Start());
-    REQUIRE(worker.Start()); // повторный Start безопасен
+    REQUIRE(worker.Start()); // repeated Start is safe
     CHECK(worker.IsRunning());
 
     worker.Stop();
-    worker.Stop(); // повторный Stop безопасен
+    worker.Stop(); // repeated Stop is safe
     CHECK_FALSE(worker.IsRunning());
 
-    REQUIRE(worker.Start()); // рабочий поток можно перезапустить
+    REQUIRE(worker.Start()); // the worker thread can be restarted
     std::atomic<bool> ran{false};
     CHECK(worker.Submit([&] { ran = true; }, 2000) == DebuggerWorker::SubmitResult::Completed);
     CHECK(ran.load());
     worker.Stop();
 }
 
-TEST_CASE("worker: переполнение очереди даёт Rejected") {
+TEST_CASE("worker: queue overflow gives Rejected") {
     DebuggerWorker worker;
     REQUIRE(worker.Start());
 
-    // Занимаем рабочий поток задачей, которая ждёт сигнала — все остальные
-    // задачи будут только накапливаться в очереди, не выполняясь.
+    // Occupy the worker thread with a task that waits for a signal — all
+    // other tasks will just pile up in the queue without running.
     std::atomic<bool> release{false};
     std::thread gateThread([&] {
         worker.Submit([&] {
@@ -290,7 +291,7 @@ TEST_CASE("worker: переполнение очереди даёт Rejected") {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    constexpr int kAttempts = 200; // заведомо больше предела очереди (64)
+    constexpr int kAttempts = 200; // knowingly larger than the queue limit (64)
     std::vector<std::thread> submitters;
     std::vector<DebuggerWorker::SubmitResult> results(kAttempts);
     for (int i = 0; i < kAttempts; ++i)
@@ -300,8 +301,7 @@ TEST_CASE("worker: переполнение очереди даёт Rejected") {
         });
     }
 
-    // Даём всем потокам время попытаться поставить задачу в очередь,
-    // прежде чем освободить шлагбаум.
+    // Give all the threads time to try to enqueue a task before releasing the gate.
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     release = true;
 

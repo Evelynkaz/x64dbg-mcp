@@ -52,12 +52,12 @@ nlohmann::json PluginLink::Call(const std::string& method, const nlohmann::json&
     std::string response;
     if (!SendLocked(method, params, response))
     {
-        // Переподключаемся РОВНО один раз: пользователь мог перезапустить
-        // x64dbg, не перезапуская MCP-клиент, и первая неудача может значить
-        // лишь то, что старое соединение устарело. Бесконечные повторы
-        // превратили бы недоступность плагина в зависание вызова вместо
-        // быстрой и понятной ошибки — поэтому вторая неудача уже
-        // возвращается вызывающему как есть.
+        // Reconnect EXACTLY once: the user may have restarted x64dbg
+        // without restarting the MCP client, and the first failure may just
+        // mean the old connection went stale. Retrying indefinitely would
+        // turn plugin unavailability into a hanging call instead of a fast,
+        // clear error — so the second failure is already returned to the
+        // caller as-is.
         if (!SendLocked(method, params, response))
             throw ToolError(TransportErrorMessage(method));
     }

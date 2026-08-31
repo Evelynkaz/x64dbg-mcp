@@ -7,36 +7,37 @@ namespace x64dbg_mcp::bridge
 namespace
 {
 
-// Ключи _meta современной модели — константы, чтобы длинные строки не
-// расходились в написании между местами использования.
+// _meta keys of the modern model — constants so the long strings don't
+// drift apart between the places that use them.
 constexpr const char* kMetaProtocolVersion = "io.modelcontextprotocol/protocolVersion";
 constexpr const char* kMetaClientCapabilities = "io.modelcontextprotocol/clientCapabilities";
 constexpr const char* kMetaServerInfo = "io.modelcontextprotocol/serverInfo";
 
-// Защита от раздувания памяти на входных данных, приходящих извне (stdin —
-// внешний, потенциально враждебный источник): отбраковываем слишком большие
-// сообщения до попытки их разобрать.
+// Protection against memory blow-up from input coming from the outside
+// (stdin is an external, potentially hostile source): reject messages that
+// are too large before even attempting to parse them.
 constexpr size_t kMaxMessageBytes = 8u * 1024u * 1024u;
 
-// Защита от переполнения стека: рекурсивный обходчик nlohmann::json при
-// большой вложенности структуры переполняет стек вызовов и убивает процесс
-// аварийно, минуя любые catch. Ограничиваем глубину до разбора.
+// Protection against stack overflow: nlohmann::json's recursive walker
+// overflows the call stack and kills the process on deeply nested input,
+// bypassing any catch. Limit the depth before parsing.
 constexpr int kMaxNestingDepth = 64;
 
-// Ошибка протокола JSON-RPC (malformed request, unknown tool и т.п.),
-// которую нужно вернуть клиенту как стандартную ошибку JSON-RPC, а не как
-// результат с isError — по классификации спецификации MCP это Protocol
-// Error, а не Tool Execution Error.
+// A JSON-RPC protocol error (malformed request, unknown tool, etc.) that
+// must be returned to the client as a standard JSON-RPC error rather than as
+// a result with isError — per the MCP specification's classification, this
+// is a Protocol Error, not a Tool Execution Error.
 struct ProtocolError
 {
     int code;
     std::string message;
 };
 
-// Считает максимальную глубину вложенности { } [ ] в сыром тексте сообщения
-// БЕЗ его разбора. Нужна отдельная дешёвая проверка ДО парсинга: полагаться
-// на сам разбор нельзя — рекурсивный парсер nlohmann::json переполняет стек
-// раньше, чем успевает сообщить об ошибке через исключение или discarded.
+// Computes the maximum nesting depth of { } [ ] in the raw message text
+// WITHOUT parsing it. A separate, cheap check is needed BEFORE parsing: you
+// cannot rely on the parse itself — nlohmann::json's recursive parser
+// overflows the stack before it manages to report an error via exception or
+// discarded.
 int ComputeMaxNestingDepth(const std::string& line)
 {
     int depth = 0;
@@ -100,9 +101,9 @@ nlohmann::json BuildServerInfo()
     return nlohmann::json{ {"name", "x64dbg-mcp"}, {"version", SERVER_VERSION_STR} };
 }
 
-// Достаёт объект _meta из params, если он есть и действительно объект;
-// иначе — пустой объект. Отдельная функция, чтобы не повторять одну и ту же
-// проверку типов в нескольких местах.
+// Extracts the _meta object from params if it is present and is actually an
+// object; otherwise returns an empty object. Kept as a separate function so
+// the same type check isn't repeated in several places.
 nlohmann::json ExtractMeta(const nlohmann::json& params)
 {
     if (params.is_object() && params.contains("_meta") && params["_meta"].is_object())
@@ -110,32 +111,32 @@ nlohmann::json ExtractMeta(const nlohmann::json& params)
     return nlohmann::json::object();
 }
 
-// Дописывает в результат современной модели обязательные поля: признак
-// завершённости запроса и информацию о сервере в _meta.
+// Adds the required fields to a modern-model result: a marker that the
+// request is complete and server info in _meta.
 void ApplyModernEnvelope(nlohmann::json& result)
 {
     result["resultType"] = "complete";
     result["_meta"][kMetaServerInfo] = BuildServerInfo();
 }
 
-// Определяет, относится ли сообщение к современной модели протокола.
+// Determines whether a message belongs to the modern protocol model.
 //
-// ВАЖНО: признаком современной модели НЕЛЬЗЯ считать сам факт наличия
-// объекта _meta в params — _meta является штатной частью MCP, и клиент
-// вправе класть туда собственные ключи в ЛЮБОЙ модели протокола. Так,
-// Claude Code 2.1.251, работающий по устаревшему рукопожатию initialize
-// (версия 2025-11-25), кладёт в _meta свои ключи "progressToken" и
-// "claudecode/toolUseId". Прежняя реализация принимала за современную
-// модель любое сообщение с непустым _meta, из-за чего сервер требовал от
-// такого клиента поле _meta["io.modelcontextprotocol/protocolVersion"],
-// не находил его и отвечал ошибкой -32602 на КАЖДЫЙ вызов инструмента —
-// продукт был неработоспособен. Дефект обнаружен подключением реального
-// клиента, поэтому эту проверку нельзя «упрощать» обратно к простому
-// params.contains("_meta").
+// IMPORTANT: the mere presence of a _meta object in params must NOT be
+// treated as a sign of the modern model — _meta is a regular part of MCP,
+// and the client is free to put its own keys there under ANY protocol
+// model. For instance, Claude Code 2.1.251, which speaks the legacy
+// initialize handshake (version 2025-11-25), puts its own "progressToken"
+// and "claudecode/toolUseId" keys into _meta. The previous implementation
+// treated any message with a non-empty _meta as modern, which made the
+// server demand the field _meta["io.modelcontextprotocol/protocolVersion"]
+// from such a client, fail to find it, and answer with error -32602 on
+// EVERY tool call — the product was unusable. The defect was found by
+// connecting a real client, so this check must not be "simplified" back to
+// a plain params.contains("_meta").
 //
-// Правильный признак — наличие в _meta хотя бы одного ключа,
-// ЗАРЕЗЕРВИРОВАННОГО спецификацией MCP, то есть начинающегося с префикса
-// "io.modelcontextprotocol/". Клиентские ключи этого префикса не имеют.
+// The correct signal is the presence in _meta of at least one key
+// RESERVED by the MCP specification, i.e. starting with the prefix
+// "io.modelcontextprotocol/". Client keys never have this prefix.
 bool IsModernProtocol(const std::string& method, const nlohmann::json& params)
 {
     if (method == "server/discover")
@@ -167,8 +168,8 @@ nlohmann::json McpServer::HandleToolsList() const
 
 nlohmann::json McpServer::HandleToolsCall(const nlohmann::json& params) const
 {
-    // Malformed request по классификации спецификации MCP — ошибка протокола,
-    // а не результат вызова инструмента.
+    // A malformed request per the MCP specification's classification is a
+    // protocol error, not a tool call result.
     if (!params.is_object() || !params.contains("name") || !params["name"].is_string())
         throw ProtocolError{ -32602, "params.name must be present and must be a string containing the tool name" };
 
@@ -186,10 +187,11 @@ nlohmann::json McpServer::HandleToolsCall(const nlohmann::json& params) const
     if (tool == nullptr)
         throw ProtocolError{ -32602, "Unknown tool: " + name };
 
-    // Ошибка инструмента (ToolError) по правилам MCP возвращается как обычный
-    // результат с isError, а не как ошибка JSON-RPC — иначе модель не увидит
-    // текст ошибки и не сможет на него отреагировать. Любое другое исключение
-    // прячем за общим сообщением, чтобы не раскрывать внутренности реализации.
+    // Per the MCP rules, a tool error (ToolError) is returned as a regular
+    // result with isError, not as a JSON-RPC error — otherwise the model
+    // wouldn't see the error text and couldn't react to it. Any other
+    // exception is hidden behind a generic message so implementation
+    // internals aren't exposed.
     try
     {
         const ToolResult result = tool->handler(arguments);
@@ -238,25 +240,27 @@ nlohmann::json McpServer::HandleDiscover() const
 
 std::optional<std::string> McpServer::HandleMessage(const std::string& line)
 {
-    // Отбраковка входа ДО разбора JSON: рекурсивный разбор глубоко вложенной
-    // или чрезмерно большой структуры может переполнить стек или память
-    // раньше, чем разбор сообщит об ошибке — это нужно проверять на сыром
-    // тексте, полагаться на сам парсер здесь нельзя.
+    // Reject the input BEFORE parsing JSON: recursively parsing a deeply
+    // nested or excessively large structure can overflow the stack or
+    // memory before parsing reports an error — this has to be checked on
+    // the raw text, we cannot rely on the parser itself here.
     if (line.size() > kMaxMessageBytes)
         return MakeErrorResponse(nullptr, -32600, "Invalid Request: message too large").dump();
 
     if (ComputeMaxNestingDepth(line) > kMaxNestingDepth)
         return MakeErrorResponse(nullptr, -32600, "Invalid Request: message nesting too deep").dump();
 
-    // Идентификатор запроса объявлен до try и используется в внешнем catch —
-    // иначе ошибка -32603 при уже разобранном id уйдёт с id: null, и клиент
-    // не сможет сопоставить ответ со своим запросом.
+    // The request id is declared before the try block and used in the outer
+    // catch — otherwise a -32603 error with an already-parsed id would go
+    // out with id: null, and the client wouldn't be able to match the
+    // response to its request.
     nlohmann::json id = nullptr;
 
-    // Последний рубеж: контракт запрещает исключениям покидать HandleMessage.
-    // nlohmann::json бросает при доступе к отсутствующим или несовместимым по
-    // типу полям, поэтому ловим всё, что могло проскочить мимо явных проверок
-    // ниже — так метод гарантированно не пробросит исключение наружу.
+    // Last line of defense: the contract forbids exceptions from escaping
+    // HandleMessage. nlohmann::json throws when accessing missing or
+    // type-mismatched fields, so we catch anything that might have slipped
+    // past the explicit checks below — this way the method is guaranteed
+    // not to propagate an exception outward.
     try
     {
         const nlohmann::json msg = nlohmann::json::parse(line, nullptr, false);
@@ -269,8 +273,8 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
         id = msg.contains("id") ? msg["id"] : nlohmann::json(nullptr);
         const bool isNotification = !msg.contains("id");
 
-        // JSON-RPC 2.0 допускает для id только строку, число или null. Любой
-        // другой тип строгий клиент не сможет сопоставить с запросом.
+        // JSON-RPC 2.0 only allows a string, a number, or null for id. A
+        // strict client would be unable to match any other type to its request.
         if (!id.is_null() && !id.is_string() && !id.is_number())
             return MakeErrorResponse(nullptr, -32600, "Invalid Request: id must be a string, number, or null").dump();
 
@@ -286,16 +290,16 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
             return std::nullopt;
         }
 
-        // Любое уведомление (сообщение без id) ответа не требует — это общее
-        // правило JSON-RPC, а не особенность конкретного метода.
+        // Any notification (a message without an id) requires no response —
+        // this is a general JSON-RPC rule, not a quirk of a specific method.
         if (isNotification)
             return std::nullopt;
 
-        // Определение модели по самому сообщению: initialize — всегда
-        // устаревшее рукопожатие; иначе — см. IsModernProtocol. Если модель
-        // определена как современная, но внутри чего-то не хватает, это
-        // выясняется ниже и превращается в корректную ошибку -32602, а не в
-        // "метод не найден".
+        // Determine the model from the message itself: initialize is always
+        // the legacy handshake; otherwise see IsModernProtocol. If the model
+        // is determined to be modern but something is missing inside, that
+        // is discovered below and turned into a proper -32602 error rather
+        // than "method not found".
         const bool isModern = (method != "initialize") && IsModernProtocol(method, params);
 
         if (isModern)
@@ -319,10 +323,9 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
             const std::string requestedVersion = meta[kMetaProtocolVersion].get<std::string>();
             if (requestedVersion != kModernVersion)
             {
-                // Клиенту нужно перечислить все версии, на которых сервер
-                // может согласовать соединение, а не только современную —
-                // иначе он не поймёт, что может откатиться на рукопожатие
-                // initialize.
+                // The client needs to see all versions the server can
+                // negotiate, not just the modern one — otherwise it won't
+                // realize it can fall back to the initialize handshake.
                 nlohmann::json supported = nlohmann::json::array({ kModernVersion });
                 for (const char* legacy : kLegacyVersions)
                     supported.push_back(legacy);
@@ -359,16 +362,16 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
             return MakeResultResponse(id, result).dump();
         }
 
-        // Устаревшая модель.
+        // Legacy model.
         if (method == "initialize")
         {
             std::string clientVersion;
             if (params.is_object() && params.contains("protocolVersion") && params["protocolVersion"].is_string())
                 clientVersion = params["protocolVersion"].get<std::string>();
 
-            // По умолчанию — наша самая новая устаревшая версия: если клиент
-            // прислал версию, которую мы не знаем, соединение не рвём, а
-            // называем свою версию, а не повторяем чужую как есть.
+            // Default to our newest legacy version: if the client sent a
+            // version we don't know, we don't break the connection — we
+            // state our own version rather than echoing the unknown one back.
             std::string negotiated = kLegacyVersions[0];
             for (const char* known : kLegacyVersions)
             {

@@ -12,9 +12,9 @@
 namespace x64dbg_mcp::plugin
 {
 
-// Очередь задач с единственным рабочим потоком. Смысл: все обращения к API
-// x64dbg должны идти из одного потока, чтобы исключить целый класс гонок.
-// Не зависит от SDK x64dbg, поэтому тестируется обычным юнит-тестом.
+// A task queue with a single worker thread. The point: all calls to the
+// x64dbg API must come from one thread, to rule out an entire class of races.
+// Does not depend on the x64dbg SDK, so it is testable with a plain unit test.
 class DebuggerWorker
 {
 public:
@@ -22,11 +22,11 @@ public:
 
     enum class SubmitResult
     {
-        Completed,   // задача выполнена
-        Timeout,     // не уложилась в отведённое время
-        NotRunning,  // рабочий поток не запущен
-        Rejected,    // очередь переполнена — состояние временное, стоит повторить позже
-        SelfSubmit,  // Submit вызван из самого рабочего потока — ошибка вызывающего кода
+        Completed,   // the task ran to completion
+        Timeout,     // did not finish within the allotted time
+        NotRunning,  // the worker thread is not running
+        Rejected,    // the queue is full — this is a transient condition, worth retrying later
+        SelfSubmit,  // Submit was called from the worker thread itself — a caller bug
     };
 
     DebuggerWorker();
@@ -37,39 +37,38 @@ public:
 
     bool Start();
 
-    // ПРЕДУПРЕЖДЕНИЕ: при выгрузке плагина перед вызовом Stop() ОБЯЗАТЕЛЬНО
-    // сначала вызвать DebugStateTracker::Shutdown(). Stop() присоединяет
-    // рабочий поток без ограничения по времени, и если задача, которую он
-    // сейчас исполняет, ждёт паузы отладчика с большим таймаутом, Stop()
-    // задержится на всё это время — подвесив тем самым поток x64dbg,
-    // вызвавший выгрузку плагина. Задачи, исполняемые этим воркером, не
-    // должны блокироваться на неограниченных по времени ожиданиях.
+    // WARNING: on plugin unload, DebugStateTracker::Shutdown() MUST be
+    // called before Stop(). Stop() joins the worker thread with no time
+    // limit, and if the task it is currently running is waiting for a
+    // debugger pause with a long timeout, Stop() will be delayed for that
+    // whole time — hanging the x64dbg thread that triggered the plugin
+    // unload. Tasks run by this worker must not block on unbounded waits.
     void Stop();
     bool IsRunning() const;
 
-    // Ставит задачу в очередь и ждёт её завершения.
-    // При Timeout задача МОЖЕТ продолжать выполняться — поэтому всё,
-    // что она использует, обязано пережить её завершение.
+    // Queues a task and waits for it to finish.
+    // On Timeout the task MAY still be running — so anything it uses
+    // must outlive its completion.
     SubmitResult Submit(Task task, int timeoutMs);
 
     size_t QueueSize() const;
 
 private:
-    // Состояние завершения одной задачи, разделяемое между Submit() и
-    // рабочим потоком. Живёт под shared_ptr, а не как локальная переменная
-    // в стеке Submit(): прервать выполняющуюся задачу нельзя (она может быть
-    // в середине вызова API отладчика), поэтому если Submit уходит по
-    // таймауту раньше, чем задача фактически завершится, рабочий поток
-    // обязан иметь право дописать в это состояние результат даже после того,
-    // как стек вызывающего Submit уже размотан. Тот же класс ошибки и то же
-    // решение, что и в PipeServerState (см. src/common/pipe_server.h).
+    // Completion state for a single task, shared between Submit() and the
+    // worker thread. It lives behind a shared_ptr rather than as a local
+    // variable on Submit()'s stack: a running task cannot be interrupted (it
+    // may be in the middle of a debugger API call), so if Submit times out
+    // before the task actually finishes, the worker thread must still be
+    // allowed to write the result into this state even after Submit's stack
+    // has already unwound. The same class of bug and the same fix as in
+    // PipeServerState (see src/common/pipe_server.h).
     struct TaskCompletion
     {
         std::mutex mutex;
         std::condition_variable cv;
         bool done = false;
-        bool cancelled = false; // задача отброшена Stop() до исполнения
-        bool abandoned = false; // Submit ушёл по таймауту, задача ещё не начата
+        bool cancelled = false; // the task was dropped by Stop() before it ran
+        bool abandoned = false; // Submit timed out while the task had not started yet
     };
 
     struct QueueItem
@@ -82,7 +81,7 @@ private:
 
     static constexpr size_t kMaxQueueSize = 64;
 
-    std::mutex lifecycleMutex_; // сериализует Start()/Stop() между собой
+    std::mutex lifecycleMutex_; // serializes Start()/Stop() against each other
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stopRequested_{false};

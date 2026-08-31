@@ -10,7 +10,7 @@ using x64dbg_mcp::plugin::PauseReason;
 using x64dbg_mcp::plugin::RunState;
 using x64dbg_mcp::plugin::StateSnapshot;
 
-TEST_CASE("debug_state: начальное состояние — NotDebugging, поколение 0") {
+TEST_CASE("debug_state: initial state is NotDebugging with generation 0") {
     DebugStateTracker tracker;
     const StateSnapshot snapshot = tracker.Current();
     CHECK(snapshot.state == RunState::NotDebugging);
@@ -18,7 +18,7 @@ TEST_CASE("debug_state: начальное состояние — NotDebugging, 
     CHECK(snapshot.generation == 0);
 }
 
-TEST_CASE("debug_state: обычная последовательность переходов") {
+TEST_CASE("debug_state: a normal sequence of transitions") {
     DebugStateTracker tracker;
 
     tracker.NotifyDebugStarted();
@@ -36,7 +36,7 @@ TEST_CASE("debug_state: обычная последовательность пе
     CHECK(tracker.Current().state == RunState::NotDebugging);
 }
 
-TEST_CASE("debug_state: поколение растёт только при переходе в паузу") {
+TEST_CASE("debug_state: generation increases only on transition to paused") {
     DebugStateTracker tracker;
 
     tracker.NotifyDebugStarted();
@@ -45,22 +45,23 @@ TEST_CASE("debug_state: поколение растёт только при пе
     tracker.NotifyPaused(PauseReason::Step);
     CHECK(tracker.Current().generation == 1);
 
-    // Возобновление не меняет поколение.
+    // Resuming does not change the generation.
     tracker.NotifyResumed();
     CHECK(tracker.Current().generation == 1);
 
     tracker.NotifyPaused(PauseReason::Breakpoint);
     CHECK(tracker.Current().generation == 2);
 
-    // Остановка отладки тоже не меняет поколение.
+    // Stopping the debug session doesn't change the generation either.
     tracker.NotifyDebugStopped();
     CHECK(tracker.Current().generation == 2);
 }
 
-// Главная проверка отсутствия гонки: пауза наступила ДО того, как её начали
-// ждать. Если бы ожидание строилось на текущем состоянии, а не на счётчике
-// поколений, этот сценарий провисел бы до таймаута.
-TEST_CASE("debug_state: ожидание не проспало событие, случившееся раньше вызова") {
+// The main check for the absence of a race: the pause happened BEFORE
+// anyone started waiting for it. If the wait were built on the current
+// state rather than the generation counter, this scenario would hang
+// until the timeout.
+TEST_CASE("debug_state: wait does not miss an event that already happened before the call") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
     const unsigned long long before = tracker.Current().generation;
@@ -75,11 +76,11 @@ TEST_CASE("debug_state: ожидание не проспало событие, �
     CHECK(result);
     CHECK(out.state == RunState::Paused);
     CHECK(out.generation > before);
-    // Возврат должен быть немедленным, а не после ожидания.
+    // The return must be immediate, not after waiting.
     CHECK(elapsed < std::chrono::milliseconds(500));
 }
 
-TEST_CASE("debug_state: ожидание без паузы завершается по таймауту за отведённое время") {
+TEST_CASE("debug_state: wait without a pause times out within the allotted time") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
     const unsigned long long before = tracker.Current().generation;
@@ -94,7 +95,7 @@ TEST_CASE("debug_state: ожидание без паузы завершаетс�
     CHECK(elapsed < std::chrono::milliseconds(2000));
 }
 
-TEST_CASE("debug_state: ожидание из другого потока просыпается при уведомлении о паузе") {
+TEST_CASE("debug_state: wait from another thread wakes up when notified of a pause") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
     const unsigned long long before = tracker.Current().generation;
@@ -108,7 +109,7 @@ TEST_CASE("debug_state: ожидание из другого потока про
         finished = true;
     });
 
-    // Даём потоку время дойти до фактического ожидания.
+    // Give the thread time to reach the actual wait.
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     tracker.NotifyPaused(PauseReason::UserPause);
 
@@ -117,7 +118,7 @@ TEST_CASE("debug_state: ожидание из другого потока про
     CHECK(result);
 }
 
-TEST_CASE("debug_state: завершение отладки будит ожидающего без ожидания полного таймаута") {
+TEST_CASE("debug_state: ending the debug session wakes the waiter without waiting the full timeout") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
     const unsigned long long before = tracker.Current().generation;
@@ -137,11 +138,11 @@ TEST_CASE("debug_state: завершение отладки будит ожид�
     const auto elapsed = std::chrono::steady_clock::now() - stopStart;
 
     CHECK_FALSE(result.load());
-    // Разбужен уведомлением, а не пятисекундным таймаутом.
+    // Woken by the notification, not by the five-second timeout.
     CHECK(elapsed < std::chrono::milliseconds(2000));
 }
 
-TEST_CASE("debug_state: после Shutdown ожидание возвращает false немедленно") {
+TEST_CASE("debug_state: after Shutdown, wait returns false immediately") {
     DebugStateTracker tracker;
     tracker.Shutdown();
     CHECK(tracker.IsShutdown());
@@ -155,7 +156,7 @@ TEST_CASE("debug_state: после Shutdown ожидание возвращае�
     CHECK(elapsed < std::chrono::milliseconds(500));
 }
 
-TEST_CASE("debug_state: Shutdown будит ожидающего в другом потоке") {
+TEST_CASE("debug_state: Shutdown wakes a waiter on another thread") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
     const unsigned long long before = tracker.Current().generation;
@@ -178,11 +179,11 @@ TEST_CASE("debug_state: Shutdown будит ожидающего в другом
     CHECK(elapsed < std::chrono::milliseconds(2000));
 }
 
-// Дефект 1: пауза наступила, но к моменту, когда WaitForPauseAfter снова
-// захватывает мьютекс после пробуждения, состояние уже перезаписано
-// возобновлением. Решение обязано опираться на поколение, а не на текущее
-// snapshot_.state — иначе этот тест ловил бы false вместо true.
-TEST_CASE("debug_state: пауза, затем возобновление — ожидание всё равно видит состоявшуюся паузу") {
+// Defect 1: the pause happened, but by the time WaitForPauseAfter reacquires
+// the mutex after waking up, the state has already been overwritten by a
+// resume. The solution must rely on the generation, not on the current
+// snapshot_.state — otherwise this test would get false instead of true.
+TEST_CASE("debug_state: pause then resume — wait still observes the pause that happened") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
     const unsigned long long before = tracker.Current().generation;
@@ -202,9 +203,10 @@ TEST_CASE("debug_state: пауза, затем возобновление — о
     CHECK(elapsed < std::chrono::milliseconds(500));
 }
 
-// Тот же дефект 1, но пауза "перекрывается" завершением отладки (процесс
-// завершился, стоя на точке останова), а не возобновлением.
-TEST_CASE("debug_state: пауза, затем завершение отладки — ожидание всё равно видит состоявшуюся паузу") {
+// The same defect 1, but the pause is "overridden" by the debug session
+// stopping (the process terminated while sitting on a breakpoint) rather
+// than by a resume.
+TEST_CASE("debug_state: pause then end debugging — wait still observes the pause that happened") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
     const unsigned long long before = tracker.Current().generation;
@@ -224,10 +226,11 @@ TEST_CASE("debug_state: пауза, затем завершение отладк
     CHECK(elapsed < std::chrono::milliseconds(500));
 }
 
-// Дефект 2: сессия ещё не начиналась, поэтому условие "state == NotDebugging"
-// не должно расцениваться как "сессия завершилась". Ожидание обязано
-// достоять до реального старта и последующей начальной точки останова.
-TEST_CASE("debug_state: ожидание начальной точки останова на ещё не начатой сессии не возвращает false мгновенно") {
+// Defect 2: the session hasn't started yet, so the condition
+// "state == NotDebugging" must not be interpreted as "the session ended".
+// The wait must hold out until the actual start and the subsequent
+// initial breakpoint.
+TEST_CASE("debug_state: waiting for the initial breakpoint on a not-yet-started session does not return false instantly") {
     DebugStateTracker tracker;
 
     std::atomic<bool> result{false};
@@ -239,8 +242,8 @@ TEST_CASE("debug_state: ожидание начальной точки оста�
         finished = true;
     });
 
-    // Даём ожидающему потоку время дойти до фактического ожидания и убеждаемся,
-    // что он не проснулся преждевременно на "сессия ещё не начиналась".
+    // Give the waiting thread time to reach the actual wait and make sure
+    // it didn't wake up prematurely on "the session hasn't started yet".
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     CHECK_FALSE(finished.load());
 
@@ -252,12 +255,12 @@ TEST_CASE("debug_state: ожидание начальной точки оста�
     CHECK(result.load());
 }
 
-// Ответ на вопрос ревью (дефект 3, позже переросший в дефект 2 живой
-// проверки): одна физическая остановка — одно поколение. Повторное
-// уведомление о паузе без промежуточного возобновления не должно увеличивать
-// поколение, но должно уточнять причину по приоритету (см. PauseReason в
-// debug_state.h), а не только заменять Unknown.
-TEST_CASE("debug_state: повторное уведомление о паузе без возобновления не увеличивает поколение") {
+// Answering a review question (defect 3, which later grew into defect 2 of
+// the live check): one physical stop — one generation. A repeated pause
+// notification without an intervening resume must not increase the
+// generation, but must refine the reason by priority (see PauseReason in
+// debug_state.h), not just replace Unknown.
+TEST_CASE("debug_state: repeated pause notification without resuming does not increase the generation") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
 
@@ -271,18 +274,18 @@ TEST_CASE("debug_state: повторное уведомление о паузе 
     CHECK(second.generation == first.generation);
     CHECK(second.reason == PauseReason::Breakpoint);
 
-    // Причина уже более приоритетна, чем Step — следующее уведомление её не портит.
+    // The reason is already higher priority than Step — the next notification doesn't spoil it.
     tracker.NotifyPaused(PauseReason::Step);
     const StateSnapshot third = tracker.Current();
     CHECK(third.generation == first.generation);
     CHECK(third.reason == PauseReason::Breakpoint);
 }
 
-// Дефект 2 живой проверки: x64dbg присылает несколько уведомлений на одну
-// физическую остановку в непредсказуемом порядке. Если менее определённая
-// причина (UserPause) приходит РАНЬШЕ более определённой (Step), она не
-// должна пережить последующее, более точное уведомление.
-TEST_CASE("debug_state: менее определённая причина уступает более определённой в пределах одной паузы") {
+// Defect 2 of the live check: x64dbg sends several notifications for one
+// physical stop in an unpredictable order. If a less specific reason
+// (UserPause) arrives BEFORE a more specific one (Step), it must not
+// survive the subsequent, more precise notification.
+TEST_CASE("debug_state: a less specific reason yields to a more specific one within the same pause") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
     const unsigned long long before = tracker.Current().generation;
@@ -295,9 +298,9 @@ TEST_CASE("debug_state: менее определённая причина ус�
     CHECK(snapshot.generation == before + 1);
 }
 
-// Обратный порядок: более определённая причина (Breakpoint), пришедшая
-// первой, не должна быть вытеснена менее определённым UserPause.
-TEST_CASE("debug_state: более определённая причина не уступает менее определённой") {
+// Reverse order: a more specific reason (Breakpoint) that arrives first
+// must not be displaced by a less specific UserPause.
+TEST_CASE("debug_state: a more specific reason does not yield to a less specific one") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
     const unsigned long long before = tracker.Current().generation;
@@ -310,11 +313,11 @@ TEST_CASE("debug_state: более определённая причина не 
     CHECK(snapshot.generation == before + 1);
 }
 
-// Ловит мутацию "предикат ожидания заменён на голое ожидание": при одной
-// паузе просыпаться с true должен только ожидающий, чьё запрошенное
-// поколение меньше нового; ожидающий "впереди" обязан продолжить ожидание
-// и завершиться по собственному таймауту.
-TEST_CASE("debug_state: при одной паузе с true просыпается только ожидающий меньшего поколения") {
+// Catches the mutation "wait predicate replaced with a bare wait": for a
+// single pause, only the waiter whose requested generation is less than
+// the new one must wake up with true; a waiter that's "ahead" must keep
+// waiting and finish on its own timeout.
+TEST_CASE("debug_state: a single pause with true wakes only the waiter with the smaller generation") {
     DebugStateTracker tracker;
     tracker.NotifyDebugStarted();
     const unsigned long long gen0 = tracker.Current().generation;
@@ -341,18 +344,18 @@ TEST_CASE("debug_state: при одной паузе с true просыпает�
     CHECK_FALSE(lowFinished.load());
     CHECK_FALSE(highFinished.load());
 
-    tracker.NotifyPaused(PauseReason::Breakpoint); // новое поколение gen0 + 1
+    tracker.NotifyPaused(PauseReason::Breakpoint); // new generation gen0 + 1
 
     lowWaiter.join();
     const auto lowElapsed = std::chrono::steady_clock::now() - overallStart;
     CHECK(lowFinished.load());
     CHECK(lowResult.load());
-    CHECK(lowElapsed < std::chrono::milliseconds(1000)); // разбужен уведомлением, не таймаутом
+    CHECK(lowElapsed < std::chrono::milliseconds(1000)); // woken by the notification, not the timeout
 
     highWaiter.join();
     const auto highElapsed = std::chrono::steady_clock::now() - overallStart;
     CHECK(highFinished.load());
-    CHECK_FALSE(highResult.load()); // не дождался поколения gen0 + 5
-    CHECK(highElapsed >= std::chrono::milliseconds(600)); // действительно достоял до своего таймаута
+    CHECK_FALSE(highResult.load()); // did not wait out generation gen0 + 5
+    CHECK(highElapsed >= std::chrono::milliseconds(600)); // actually held out until its own timeout
     CHECK(highElapsed < std::chrono::milliseconds(2000));
 }

@@ -1,7 +1,7 @@
-# Скачивает официальный x64dbg Plugin SDK. Архив содержит собственный
-# CMakeLists.txt, который определяет интерфейсную цель `x64dbg` и функцию
-# `x64dbg_plugin(<target> <sources...>)`. SDK намеренно не вендорится в
-# репозиторий — он загружается на этапе конфигурации через FetchContent.
+# Downloads the official x64dbg Plugin SDK. The archive contains its own
+# CMakeLists.txt, which defines the interface target `x64dbg` and the function
+# `x64dbg_plugin(<target> <sources...>)`. The SDK is deliberately not vendored
+# into the repository — it is downloaded at configuration time via FetchContent.
 include(FetchContent)
 
 FetchContent_Declare(x64dbg_sdk

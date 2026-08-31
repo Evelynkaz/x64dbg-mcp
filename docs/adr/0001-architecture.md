@@ -1,132 +1,137 @@
-# ADR 0001. Архитектура: плагин + отдельный stdio-процесс
+# ADR 0001. Architecture: plugin + separate stdio process
 
-- Статус: Принято
-- Дата: 2026-08-30
+- Status: Accepted
+- Date: 2026-08-30
 
-## Контекст
+## Context
 
-Цель проекта — MCP-сервер для отладчика x64dbg, дающий ИИ-агенту полноценный доступ
-к возможностям реверс-инжиниринга и отладки.
+The project's goal is an MCP server for the x64dbg debugger that gives an AI agent
+full access to reverse-engineering and debugging capabilities.
 
-Продукт устанавливают сторонние пользователи, поэтому важнее всего стабильность
-работы и отсутствие рантайм-зависимостей, которые пользователю пришлось бы
-устанавливать отдельно.
+The product is installed by third-party users, so what matters most is runtime
+stability and the absence of runtime dependencies the user would have to install
+separately.
 
-Пользователь явно предпочитает транспорт stdio.
+The user explicitly prefers the stdio transport.
 
-Проверенное окружение: x64dbg установлен в `D:\Reverse\x64dbg` (сборка 2025.08.19);
-компилятор — MSVC 19.x из состава Visual Studio 18.2.1; актуальный SDK взят из
-релиза x64dbg `2026.05.27`, ассет `x64dbg-pluginsdk-cmake.zip`.
+Verified environment: x64dbg installed at `D:\Reverse\x64dbg` (build 2025.08.19);
+compiler — MSVC 19.x from Visual Studio 18.2.1; the current SDK is taken from
+x64dbg release `2026.05.27`, asset `x64dbg-pluginsdk-cmake.zip`.
 
-## Рассматриваемые варианты
+## Options considered
 
-### Вариант A — всё в одном
+### Option A — all-in-one
 
-C++ плагин `.dp64`/`.dp32`, который сам поднимает MCP-сервер по Streamable HTTP
-на 127.0.0.1.
+A C++ plugin (`.dp64`/`.dp32`) that brings up its own MCP server over Streamable
+HTTP on 127.0.0.1.
 
-### Вариант B — мост
+### Option B — bridge
 
-C++ плагин внутри x64dbg плюс отдельный процесс MCP-сервера; общение между ними —
-через named pipe.
+A C++ plugin inside x64dbg plus a separate MCP server process; the two talk over
+a named pipe.
 
-## Критерии
+## Criteria
 
-- Соответствие требованию транспорта stdio.
-- Устойчивость отладчика к сбоям сервера.
-- Объём внешних зависимостей.
-- Тестируемость.
-- Задержка.
-- Сложность (число движущихся частей).
-- Удобство установки для конечного пользователя.
+- Compliance with the stdio transport requirement.
+- Debugger resilience to server failures.
+- Amount of external dependencies.
+- Testability.
+- Latency.
+- Complexity (number of moving parts).
+- Ease of installation for the end user.
 
-## Решение
+## Decision
 
-Принят **вариант B**: плагин `x64dbg-mcp.dp64`/`.dp32` и отдельный исполняемый файл
-`x64dbg-mcp.exe` (stdio MCP-сервер). Обе части реализуются на C++17, в одном
-репозитории, с одной сборкой CMake.
+**Option B** is adopted: a `x64dbg-mcp.dp64`/`.dp32` plugin plus a separate
+`x64dbg-mcp.exe` executable (the stdio MCP server). Both parts are implemented in
+C++17, in a single repository, with a single CMake build.
 
-Обоснование:
+Rationale:
 
-1. **stdio несовместим с вариантом A.** В stdio-транспорте MCP клиент запускает
-   сервер как дочерний процесс и общается через его стандартные потоки ввода-вывода.
-   x64dbg — GUI-приложение, его стандартные потоки не принадлежат MCP-клиенту; чтобы
-   получить stdio, клиенту пришлось бы самому запускать x64dbg как свой subprocess и
-   управлять его жизненным циклом, что неприемлемо. Вариант A вынуждает перейти на
-   HTTP, то есть отказаться от требования пользователя.
+1. **stdio is incompatible with option A.** In the stdio transport, the MCP
+   client launches the server as a child process and talks to it over its
+   standard input/output streams. x64dbg is a GUI application; its standard
+   streams don't belong to the MCP client. To get stdio, the client would have
+   to launch x64dbg itself as its own subprocess and manage its lifecycle,
+   which is unacceptable. Option A forces a move to HTTP, i.e. abandoning the
+   user's requirement.
 
-2. **Спецификация MCP требует перезапускаемости сервера.** Ревизия спецификации от
-   2026-07-28 предписывает клиенту перезапускать упавший stdio-сервер, а протокол
-   объявлен stateless. Перезапуск отдельного моста безвреден. Перезапуск x64dbg
-   означал бы потерю сессии отладки — вариант A конфликтует с моделью протокола.
+2. **The MCP specification requires the server to be restartable.** The spec
+   revision from 2026-07-28 mandates that the client restart a crashed stdio
+   server, and the protocol is declared stateless. Restarting a standalone
+   bridge is harmless. Restarting x64dbg would mean losing the debugging
+   session — option A conflicts with the protocol's model.
 
-3. **Изоляция сбоев.** Разбор JSON от модели, валидация схем, форматирование ответов —
-   самый вероятный источник ошибок, и в варианте B этот код исполняется вне x64dbg.
-   Внутри отладчика остаётся минимальный аудируемый слой: приём кадра, вызов SDK,
-   отправка ответа.
+3. **Failure isolation.** Parsing JSON from the model, schema validation,
+   response formatting — this is the most likely source of bugs, and in option
+   B that code runs outside x64dbg. Inside the debugger, only a minimal,
+   auditable layer remains: receive a frame, call the SDK, send a response.
 
-4. **Меньше зависимостей, а не больше.** Вариант A потребовал бы вендорить
-   HTTP-сервер. В варианте B HTTP не нужен вообще: остаётся только header-only
-   JSON-библиотека. Это уменьшает объём чужого кода внутри процесса отладчика.
+4. **Fewer dependencies, not more.** Option A would require vendoring an HTTP
+   server. Option B needs no HTTP at all: only a header-only JSON library
+   remains. This reduces the amount of third-party code running inside the
+   debugger process.
 
-5. **Тестируемость.** MCP-слой, валидация параметров и сериализация тестируются
-   юнит-тестами без запущенного x64dbg.
+5. **Testability.** The MCP layer, parameter validation, and serialization are
+   unit-tested without a running x64dbg.
 
-## Последствия
+## Consequences
 
-Положительные:
+Positive:
 
-- Соответствие требованию транспорта stdio.
-- Сбой сервера не роняет отладчик.
-- MCP-слой тестируется изолированно от x64dbg.
-- У пользователя нет рантайм-зависимостей: статический CRT, self-contained `.exe`.
+- Compliance with the stdio transport requirement.
+- A server crash does not bring down the debugger.
+- The MCP layer is tested in isolation from x64dbg.
+- No runtime dependencies for the user: static CRT, a self-contained `.exe`.
 
-Отрицательные и как смягчаем:
+Negative, and how we mitigate them:
 
-- Появляется IPC-протокол — свой источник багов и предмет версионирования.
-  Смягчение: минимальный кадр (4-байтовый little-endian префикс длины + UTF-8 JSON),
-  версия протокола передаётся в первом сообщении, при несовпадении мажорной версии
-  соединение отклоняется; протокол описан в отдельном документе `docs/protocol.md`.
-- Две единицы поставки вместо одной (`.dp64`/`.dp32` и `.exe`). Смягчение: обе
-  собираются одной командой и кладутся в один архив релиза.
-- Дополнительная задержка на IPC. Оценка: доли миллисекунды на локальном named pipe,
-  что пренебрежимо на фоне самих операций отладки.
+- An IPC protocol appears — its own source of bugs and a versioning concern.
+  Mitigation: a minimal frame (4-byte little-endian length prefix + UTF-8
+  JSON), the protocol version is sent in the first message, and the connection
+  is rejected on a major-version mismatch; the protocol is documented in a
+  separate file, `docs/protocol.md`.
+- Two deliverables instead of one (`.dp64`/`.dp32` and `.exe`). Mitigation:
+  both are built by a single command and shipped in a single release archive.
+- Extra IPC latency. Estimate: fractions of a millisecond on a local named
+  pipe, negligible compared to the debugging operations themselves.
 
-## Язык реализации
+## Implementation language
 
-C++17 для обеих частей. Обоснование: плагин обязан быть нативным; единый язык даёт
-один репозиторий, одну систему сборки и общий код (JSON, кадрирование IPC,
-форматирование). Self-contained `.exe` со статически слинкованным CRT не требует от
-пользователя ни интерпретатора, ни распространяемых пакетов. Альтернативы (Python,
-C#) отвергнуты именно из-за рантайм-зависимости у конечного пользователя.
+C++17 for both parts. Rationale: the plugin must be native; a single language
+gives one repository, one build system, and shared code (JSON, IPC framing,
+formatting). A self-contained `.exe` with a statically linked CRT requires
+neither an interpreter nor redistributable packages from the user.
+Alternatives (Python, C#) were rejected precisely because of the runtime
+dependency they'd impose on the end user.
 
-## Внешние зависимости
+## External dependencies
 
-Только header-only библиотеки, вендорятся в `third_party/` с указанием версии и
-лицензии:
+Header-only libraries only, vendored under `third_party/` with version and
+license noted:
 
-- nlohmann/json — JSON, лицензия MIT.
-- doctest — юнит-тесты, лицензия MIT.
+- nlohmann/json — JSON, MIT license.
+- doctest — unit tests, MIT license.
 
-Обе лицензии совместимы с лицензией проекта. HTTP-библиотека не нужна — прямое
-следствие выбора варианта B.
+Both licenses are compatible with the project's license. No HTTP library is
+needed — a direct consequence of choosing option B.
 
-SDK x64dbg не вендорится: он скачивается при конфигурации CMake из официального
-релиза, чтобы в репозитории не было чужого кода.
+The x64dbg SDK is not vendored: it is downloaded during CMake configuration
+from the official release, so the repository contains no third-party code.
 
-## Схема
+## Diagram
 
 ```
-MCP-клиент (Claude Desktop / Claude Code)
+MCP client (Claude Desktop / Claude Code)
         |  stdio, JSON-RPC 2.0
         v
-x64dbg-mcp.exe (мост)
+x64dbg-mcp.exe (bridge)
         |  named pipe
         v
-x64dbg-mcp.dp64 (плагин в процессе x64dbg.exe)
-        |  очередь
+x64dbg-mcp.dp64 (plugin inside the x64dbg.exe process)
+        |  queue
         v
-выделенный рабочий поток
+dedicated worker thread
         |
         v
 x64dbg SDK
