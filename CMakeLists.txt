@@ -33,6 +33,18 @@ target_include_directories(nlohmann_json INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/t
 add_library(doctest INTERFACE)
 target_include_directories(doctest INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
+# Ядро плагина: состояние отладки и очередь задач.
+# Не зависит от SDK x64dbg, поэтому тестируется без отладчика.
+add_library(x64dbg-mcp-plugin-core STATIC
+    src/plugin/debug_state.h
+    src/plugin/debug_state.cpp
+    src/plugin/worker.h
+    src/plugin/worker.cpp
+)
+target_include_directories(x64dbg-mcp-plugin-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+target_link_libraries(x64dbg-mcp PRIVATE x64dbg-mcp-plugin-core)
+
 # Общий код моста и плагина: формат обмена, разбор кадров.
 # Не зависит ни от Windows API, ни от SDK x64dbg — поэтому тестируется отдельно.
 add_library(x64dbg-mcp-common STATIC
@@ -98,7 +110,9 @@ if(X64DBG_MCP_BUILD_TESTS)
         tests/unit/test_framing.cpp
         tests/unit/test_mcp_server.cpp
         tests/unit/test_pipe.cpp
+        tests/unit/test_debug_state.cpp
+        tests/unit/test_worker.cpp
     )
-    target_link_libraries(x64dbg-mcp-tests PRIVATE nlohmann_json doctest x64dbg-mcp-common x64dbg-mcp-bridge-core)
+    target_link_libraries(x64dbg-mcp-tests PRIVATE nlohmann_json doctest x64dbg-mcp-common x64dbg-mcp-bridge-core x64dbg-mcp-plugin-core)
     add_test(NAME unit COMMAND x64dbg-mcp-tests)
 endif()
