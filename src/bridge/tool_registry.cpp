@@ -1,4 +1,8 @@
 #include "bridge/tool_registry.h"
+#include "bridge/debugger_tools.h"
+#include "bridge/plugin_link.h"
+
+#include <sstream>
 
 namespace x64dbg_mcp::bridge
 {
@@ -41,15 +45,16 @@ size_t ToolRegistry::Size() const
     return tools_.size();
 }
 
-ToolRegistry CreateDefaultRegistry()
+ToolRegistry CreateDefaultRegistry(std::shared_ptr<PluginLink> link)
 {
     ToolRegistry registry;
 
     Tool serverStatus;
     serverStatus.name = "server_status";
     serverStatus.description =
-        "Reports the version of the x64dbg-mcp server and the connection state "
-        "with the plugin running inside x64dbg. Does not require an active "
+        "Reports the version of the x64dbg-mcp server, the name of the named "
+        "pipe it connects to, and whether the plugin running inside x64dbg is "
+        "currently reachable on that pipe. Does not require an active "
         "debugging session. Call this tool first whenever another tool returns "
         "a connection error, to check whether x64dbg is running with the "
         "x64dbg-mcp plugin installed before investigating further.";
@@ -59,17 +64,30 @@ ToolRegistry CreateDefaultRegistry()
         {"properties", nlohmann::json::object()},
         {"additionalProperties", false}
     };
-    serverStatus.handler = [](const nlohmann::json& /*arguments*/) -> nlohmann::json
+    serverStatus.handler = [link](const nlohmann::json& /*arguments*/) -> ToolResult
     {
-        return nlohmann::json{
+        const bool connected = link ? link->IsAvailable() : false;
+        const std::string pipeName = link ? link->PipeName() : std::string();
+
+        ToolResult result;
+        result.structuredContent = {
             {"server_version", SERVER_VERSION_STR},
-            // Подключение к плагину появится вместе со слоем канала (framing/ipc);
-            // до тех пор инструмент честно сообщает, что канала ещё нет.
-            {"plugin_connected", false}
+            {"plugin_connected", connected},
+            {"pipe_name", pipeName}
         };
+
+        std::ostringstream text;
+        text << "x64dbg-mcp server " << SERVER_VERSION_STR << ", pipe \"" << pipeName << "\": ";
+        if (connected)
+            text << "plugin connected.";
+        else
+            text << "plugin not connected. Start x64dbg with the x64dbg-mcp plugin installed.";
+        result.text = text.str();
+        return result;
     };
 
     registry.Add(std::move(serverStatus));
+    RegisterDebuggerTools(registry, link);
     return registry;
 }
 

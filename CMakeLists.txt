@@ -73,6 +73,10 @@ target_link_libraries(x64dbg-mcp PRIVATE x64dbg-mcp-common)
 add_library(x64dbg-mcp-bridge-core STATIC
     src/bridge/logging.h
     src/bridge/logging.cpp
+    src/bridge/plugin_link.h
+    src/bridge/plugin_link.cpp
+    src/bridge/debugger_tools.h
+    src/bridge/debugger_tools.cpp
     src/bridge/tool_registry.h
     src/bridge/tool_registry.cpp
     src/bridge/mcp_server.h
@@ -117,6 +121,7 @@ if(X64DBG_MCP_BUILD_TESTS)
         tests/unit/test_framing.cpp
         tests/unit/test_mcp_server.cpp
         tests/unit/test_pipe.cpp
+        tests/unit/test_plugin_link.cpp
         tests/unit/test_debug_state.cpp
         tests/unit/test_worker.cpp
     )

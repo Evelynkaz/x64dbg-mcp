@@ -1,19 +1,37 @@
 #include "bridge/mcp_server.h"
+#include "bridge/plugin_link.h"
 #include "bridge/tool_registry.h"
+#include "common/pipe_server.h"
 #include "doctest/doctest.h"
 #include "nlohmann/json.hpp"
 
+#include <atomic>
+#include <memory>
 #include <string>
 #include <vector>
 
+using x64dbg_mcp::PipeServer;
 using x64dbg_mcp::bridge::CreateDefaultRegistry;
 using x64dbg_mcp::bridge::kLegacyVersions;
 using x64dbg_mcp::bridge::kModernVersion;
 using x64dbg_mcp::bridge::McpServer;
+using x64dbg_mcp::bridge::PluginLink;
+using x64dbg_mcp::bridge::Tool;
+using x64dbg_mcp::bridge::ToolRegistry;
+using x64dbg_mcp::bridge::ToolResult;
 using nlohmann::json;
 
 namespace
 {
+
+// Уникальное имя канала на каждый тест, чтобы прогоны с фиктивным плагином
+// не мешали друг другу (в том числе повторные прогоны набора тестов подряд).
+std::string MakeMcpTestPipeName()
+{
+    static std::atomic<int> counter{0};
+    return R"(\\.\pipe\x64dbg-mcp-mcp-server-test-)" + std::to_string(GetCurrentProcessId()) +
+           "-" + std::to_string(++counter);
+}
 
 // Свежий сервер на каждый тест: HandleMessage не хранит состояния между
 // вызовами, но так проще читать сценарии по отдельности.
@@ -107,6 +125,92 @@ TEST_CASE("mcp: tools/call для server_status возвращает content и 
     CHECK(msg["result"]["structuredContent"].contains("server_version"));
     // Спецификация MCP показывает isError: false в примерах успешного результата.
     CHECK(msg["result"]["isError"] == false);
+}
+
+// server_status задаёт человекочитаемый text, поэтому content[0].text должен
+// быть читаемой строкой, а не сериализованным structuredContent.
+TEST_CASE("mcp: content[0].text инструмента с заданным text не является JSON") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":30,"method":"tools/call",
+        "params":{"name":"server_status","arguments":{}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    const std::string text = msg["result"]["content"][0]["text"].get<std::string>();
+    REQUIRE_FALSE(text.empty());
+    CHECK(text[0] != '{');
+}
+
+TEST_CASE("mcp: structuredContent read_memory и disassemble не содержит поле text верхнего уровня") {
+    const std::string pipeName = MakeMcpTestPipeName();
+
+    PipeServer pipeServer;
+    REQUIRE(pipeServer.Start(pipeName, [](const std::string& request) -> std::string {
+        const json parsed = json::parse(request);
+        const std::string method = parsed.at("method").get<std::string>();
+
+        json result;
+        if (method == "memory.read")
+            result = { {"address", 0}, {"size", 4}, {"data", "deadbeef"} };
+        else if (method == "disasm")
+            result = json::array({ {{"address", 0}, {"size", 1}, {"text", "nop"}, {"bytes", "90"}} });
+
+        return json{ {"id", parsed.at("id")}, {"ok", true}, {"result", result} }.dump();
+    }));
+
+    auto link = std::make_shared<PluginLink>(pipeName, 1000, 3000);
+    McpServer server(CreateDefaultRegistry(link));
+
+    const std::string readRequest = R"({"jsonrpc":"2.0","id":31,"method":"tools/call",
+        "params":{"name":"read_memory","arguments":{"address":0,"size":4}}})";
+    auto readResponse = server.HandleMessage(readRequest);
+    REQUIRE(readResponse.has_value());
+    const json readMsg = Parse(*readResponse);
+    CHECK_FALSE(readMsg["result"]["structuredContent"].contains("text"));
+    CHECK(readMsg["result"]["content"][0]["text"].get<std::string>()[0] != '{');
+
+    const std::string disasmRequest = R"({"jsonrpc":"2.0","id":32,"method":"tools/call",
+        "params":{"name":"disassemble","arguments":{"address":0,"count":1}}})";
+    auto disasmResponse = server.HandleMessage(disasmRequest);
+    REQUIRE(disasmResponse.has_value());
+    const json disasmMsg = Parse(*disasmResponse);
+    CHECK_FALSE(disasmMsg["result"]["structuredContent"].contains("text"));
+    CHECK(disasmMsg["result"]["content"][0]["text"].get<std::string>()[0] != '{');
+
+    pipeServer.Stop();
+}
+
+TEST_CASE("mcp: инструмент без заданного text получает сериализацию structuredContent с отступами") {
+    ToolRegistry registry;
+    Tool tool;
+    tool.name = "fake_tool";
+    tool.description = "test tool";
+    tool.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", json::object()},
+        {"additionalProperties", false}
+    };
+    tool.handler = [](const json& /*arguments*/) -> ToolResult {
+        ToolResult result;
+        result.structuredContent = { {"a", 1}, {"b", {{"c", 2}}} };
+        return result;
+    };
+    registry.Add(std::move(tool));
+
+    McpServer server(std::move(registry));
+    const std::string request = R"({"jsonrpc":"2.0","id":33,"method":"tools/call",
+        "params":{"name":"fake_tool","arguments":{}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    const std::string text = msg["result"]["content"][0]["text"].get<std::string>();
+    CHECK(text == msg["result"]["structuredContent"].dump(2));
+    CHECK(text.find('\n') != std::string::npos);
 }
 
 // Спецификация MCP (раздел Error Handling) относит неизвестное имя

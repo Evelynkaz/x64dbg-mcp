@@ -1,9 +1,12 @@
 #include "bridge/logging.h"
 #include "bridge/mcp_server.h"
+#include "bridge/plugin_link.h"
 #include "bridge/stdio_transport.h"
 #include "bridge/tool_registry.h"
+#include "common/ipc_protocol.h"
 
 #include <iostream>
+#include <memory>
 #include <string>
 
 using namespace x64dbg_mcp::bridge;
@@ -15,8 +18,12 @@ void PrintHelp()
 {
     std::cerr <<
         "x64dbg-mcp: MCP server for the x64dbg debugger (stdio transport)\n"
-        "Usage: x64dbg-mcp [--log-level <error|warn|info|debug>] [--help]\n"
+        "Usage: x64dbg-mcp [--log-level <error|warn|info|debug>] [--pipe <name>] [--help]\n"
         "  --log-level <level>  minimum log level written to stderr (default: info)\n"
+        "  --pipe <name>         named pipe of the x64dbg-mcp plugin to connect to\n"
+        "                        (default: " << x64dbg_mcp::ipc::kDefaultPipeName << ")\n"
+        "                        use this when multiple x64dbg instances are running\n"
+        "                        and the plugin picked a name suffixed with its process id\n"
         "  --help                show this help message and exit\n";
 }
 
@@ -38,6 +45,7 @@ int main(int argc, char** argv)
     try
     {
         LogLevel level = LogLevel::Info;
+        std::string pipeName = x64dbg_mcp::ipc::kDefaultPipeName;
 
         for (int i = 1; i < argc; ++i)
         {
@@ -61,6 +69,15 @@ int main(int argc, char** argv)
                     return 1;
                 }
             }
+            else if (arg == "--pipe")
+            {
+                if (i + 1 >= argc)
+                {
+                    std::cerr << "--pipe requires a value\n";
+                    return 1;
+                }
+                pipeName = argv[++i];
+            }
             else
             {
                 std::cerr << "Unknown argument: " << arg << "\n";
@@ -70,7 +87,8 @@ int main(int argc, char** argv)
 
         SetLogLevel(level);
 
-        McpServer server(CreateDefaultRegistry());
+        auto link = std::make_shared<PluginLink>(pipeName);
+        McpServer server(CreateDefaultRegistry(link));
         RunStdioLoop(server);
         return 0;
     }

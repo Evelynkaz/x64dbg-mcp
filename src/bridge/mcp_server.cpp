@@ -192,12 +192,13 @@ nlohmann::json McpServer::HandleToolsCall(const nlohmann::json& params) const
     // прячем за общим сообщением, чтобы не раскрывать внутренности реализации.
     try
     {
-        nlohmann::json structured = tool->handler(arguments);
+        const ToolResult result = tool->handler(arguments);
+        const std::string text = result.text.empty() ? result.structuredContent.dump(2) : result.text;
         return nlohmann::json{
             {"content", nlohmann::json::array({
-                { {"type", "text"}, {"text", structured.dump()} }
+                { {"type", "text"}, {"text", text} }
             })},
-            {"structuredContent", structured},
+            {"structuredContent", result.structuredContent},
             {"isError", false}
         };
     }
