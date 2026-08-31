@@ -103,4 +103,65 @@ bool ManageBreakpoint(const std::string& action, unsigned long long address, std
 // Список всех установленных точек останова всех типов.
 bool ListBreakpoints(std::vector<BreakpointInfo>& out, std::string& error);
 
+// Верхние пределы на количество экспортов и импортов, возвращаемых за один
+// вызов GetModuleDetails: у крупных системных модулей (например, ntdll.dll)
+// счёт идёт на тысячи записей, а полный список забьёт контекст модели.
+constexpr size_t kMaxExports = 4096;
+constexpr size_t kMaxImports = 4096;
+
+// Сведения о загруженном модуле.
+struct ModuleEntry
+{
+    unsigned long long base = 0, size = 0, entry = 0;
+    int sectionCount = 0;
+    std::string name, path;
+};
+
+// Список всех загруженных модулей.
+bool ListModules(std::vector<ModuleEntry>& out, std::string& error);
+
+struct SectionEntry { unsigned long long address = 0, size = 0; std::string name; };
+struct ExportEntry { unsigned long long ordinal = 0, rva = 0, va = 0; bool forwarded = false; std::string name, forwardName; };
+struct ImportEntry { unsigned long long iatRva = 0, iatVa = 0, ordinal = 0; std::string name; };
+
+// Подробные сведения об одном модуле: секции и, опционально, экспорты/импорты.
+struct ModuleDetails
+{
+    ModuleEntry module;
+    std::vector<SectionEntry> sections;
+    std::vector<ExportEntry> exports;
+    std::vector<ImportEntry> imports;
+    bool exportsTruncated = false, importsTruncated = false;
+};
+
+// Модуль задаётся ЛИБО именем (byAddress == false), ЛИБО адресом внутри него
+// (byAddress == true).
+bool GetModuleDetails(const std::string& name, unsigned long long address, bool byAddress,
+                      bool includeExports, bool includeImports,
+                      ModuleDetails& out, std::string& error);
+
+// Одна страница памяти из карты памяти отлаживаемого процесса.
+struct MemoryRegion
+{
+    unsigned long long base = 0, allocationBase = 0, size = 0;
+    std::string state, type, protect, info;
+};
+
+// Карта памяти отлаживаемого процесса.
+bool GetMemoryMap(std::vector<MemoryRegion>& out, std::string& error);
+
+// Сведения об одном потоке отлаживаемого процесса.
+struct ThreadEntry
+{
+    unsigned int id = 0;
+    int number = 0;
+    unsigned long long entry = 0, teb = 0, cip = 0;
+    unsigned int suspendCount = 0, lastError = 0;
+    std::string name, priority, waitReason;
+    bool current = false;
+};
+
+// Список всех потоков отлаживаемого процесса.
+bool ListThreads(std::vector<ThreadEntry>& out, std::string& error);
+
 } // namespace x64dbg_mcp::plugin

@@ -490,6 +490,225 @@ std::string HandleBreakpointList(DebuggerWorker& worker, const nlohmann::json& i
     return BuildOkResponse(id, result);
 }
 
+struct ListModulesOutcome
+{
+    bool ok = false;
+    std::vector<ModuleEntry> modules;
+    std::string error;
+};
+
+nlohmann::json ModuleEntryToJson(const ModuleEntry& mod)
+{
+    nlohmann::json item;
+    item["base"] = mod.base;
+    item["size"] = mod.size;
+    item["entry"] = mod.entry;
+    item["sectionCount"] = mod.sectionCount;
+    item["name"] = mod.name;
+    item["path"] = mod.path;
+    return item;
+}
+
+std::string HandleModulesList(DebuggerWorker& worker, const nlohmann::json& id)
+{
+    auto outcome = std::make_shared<ListModulesOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome] { outcome->ok = ListModules(outcome->modules, outcome->error); }, kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& mod : outcome->modules)
+        list.push_back(ModuleEntryToJson(mod));
+
+    nlohmann::json result;
+    result["modules"] = list;
+    return BuildOkResponse(id, result);
+}
+
+struct ModuleDetailsOutcome
+{
+    bool ok = false;
+    ModuleDetails details;
+    std::string error;
+};
+
+std::string HandleModuleInfo(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    const bool hasName = params.is_object() && params.contains("name");
+    const bool hasAddress = params.is_object() && params.contains("address");
+    if (!hasName && !hasAddress)
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument,
+            "Either parameter \"name\" or parameter \"address\" is required");
+
+    std::string paramError;
+    std::string name;
+    unsigned long long address = 0;
+    const bool byAddress = hasAddress;
+    if (byAddress)
+    {
+        if (!GetUint64Param(params, "address", address, paramError))
+            return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+    }
+    else if (!GetRequiredStringParam(params, "name", name, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    bool includeExports = false;
+    if (!GetOptionalBoolParam(params, "include_exports", false, includeExports, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    bool includeImports = false;
+    if (!GetOptionalBoolParam(params, "include_imports", false, includeImports, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<ModuleDetailsOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, name, address, byAddress, includeExports, includeImports]
+        {
+            outcome->ok = GetModuleDetails(name, address, byAddress, includeExports, includeImports,
+                outcome->details, outcome->error);
+        },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    const ModuleDetails& details = outcome->details;
+    nlohmann::json sections = nlohmann::json::array();
+    for (const auto& section : details.sections)
+    {
+        nlohmann::json item;
+        item["address"] = section.address;
+        item["size"] = section.size;
+        item["name"] = section.name;
+        sections.push_back(std::move(item));
+    }
+
+    nlohmann::json exports = nlohmann::json::array();
+    for (const auto& exp : details.exports)
+    {
+        nlohmann::json item;
+        item["ordinal"] = exp.ordinal;
+        item["rva"] = exp.rva;
+        item["va"] = exp.va;
+        item["forwarded"] = exp.forwarded;
+        item["name"] = exp.name;
+        item["forwardName"] = exp.forwardName;
+        exports.push_back(std::move(item));
+    }
+
+    nlohmann::json imports = nlohmann::json::array();
+    for (const auto& imp : details.imports)
+    {
+        nlohmann::json item;
+        item["iatRva"] = imp.iatRva;
+        item["iatVa"] = imp.iatVa;
+        item["ordinal"] = imp.ordinal;
+        item["name"] = imp.name;
+        imports.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["module"] = ModuleEntryToJson(details.module);
+    result["sections"] = sections;
+    result["exports"] = exports;
+    result["exportsTruncated"] = details.exportsTruncated;
+    result["imports"] = imports;
+    result["importsTruncated"] = details.importsTruncated;
+    return BuildOkResponse(id, result);
+}
+
+struct MemoryMapOutcome
+{
+    bool ok = false;
+    std::vector<MemoryRegion> regions;
+    std::string error;
+};
+
+std::string HandleMemoryMap(DebuggerWorker& worker, const nlohmann::json& id)
+{
+    auto outcome = std::make_shared<MemoryMapOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome] { outcome->ok = GetMemoryMap(outcome->regions, outcome->error); }, kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& region : outcome->regions)
+    {
+        nlohmann::json item;
+        item["base"] = region.base;
+        item["allocationBase"] = region.allocationBase;
+        item["size"] = region.size;
+        item["state"] = region.state;
+        item["type"] = region.type;
+        item["protect"] = region.protect;
+        item["info"] = region.info;
+        list.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["regions"] = list;
+    return BuildOkResponse(id, result);
+}
+
+struct ListThreadsOutcome
+{
+    bool ok = false;
+    std::vector<ThreadEntry> threads;
+    std::string error;
+};
+
+std::string HandleThreadsList(DebuggerWorker& worker, const nlohmann::json& id)
+{
+    auto outcome = std::make_shared<ListThreadsOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome] { outcome->ok = ListThreads(outcome->threads, outcome->error); }, kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& thread : outcome->threads)
+    {
+        nlohmann::json item;
+        item["id"] = thread.id;
+        item["number"] = thread.number;
+        item["entry"] = thread.entry;
+        item["teb"] = thread.teb;
+        item["cip"] = thread.cip;
+        item["suspendCount"] = thread.suspendCount;
+        item["lastError"] = thread.lastError;
+        item["name"] = thread.name;
+        item["priority"] = thread.priority;
+        item["waitReason"] = thread.waitReason;
+        item["current"] = thread.current;
+        list.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["threads"] = list;
+    return BuildOkResponse(id, result);
+}
+
 // Коллбэки состояния отладки. Исполняются в потоках отладчика x64dbg, поэтому
 // обязаны быть максимально короткими и не бросать исключений: DebugStateTracker
 // сам по себе исключений не бросает.
@@ -601,6 +820,14 @@ std::string McpService::HandleRequest(const std::string& request)
         return HandleBreakpointManage(worker_, id, params);
     if (method == "breakpoint.list")
         return HandleBreakpointList(worker_, id);
+    if (method == "modules.list")
+        return HandleModulesList(worker_, id);
+    if (method == "module.info")
+        return HandleModuleInfo(worker_, id, params);
+    if (method == "memory.map")
+        return HandleMemoryMap(worker_, id);
+    if (method == "threads.list")
+        return HandleThreadsList(worker_, id);
 
     return BuildErrorResponse(id, ipc::ErrorCode::UnknownMethod, "Unknown method: " + method);
 }

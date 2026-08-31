@@ -220,6 +220,239 @@ std::string FormatDebuggerStatus(const nlohmann::json& status)
     return out.str();
 }
 
+// Выровненная таблица модулей: база, размер, точка входа, имя.
+std::string FormatModuleList(const nlohmann::json& modules)
+{
+    std::ostringstream out;
+    out << std::left
+        << std::setw(18) << "Base"
+        << std::setw(12) << "Size"
+        << std::setw(18) << "Entry"
+        << "Name" << '\n';
+
+    for (const auto& module : modules)
+    {
+        const std::uint64_t base = module.value("base", 0ULL);
+        const std::uint64_t size = module.value("size", 0ULL);
+        const std::uint64_t entry = module.value("entry", 0ULL);
+        const std::string name = module.value("name", std::string());
+
+        std::ostringstream baseText, sizeText, entryText;
+        baseText << "0x" << std::hex << base;
+        sizeText << "0x" << std::hex << size;
+        entryText << "0x" << std::hex << entry;
+
+        out << std::left
+            << std::setw(18) << baseText.str()
+            << std::setw(12) << sizeText.str()
+            << std::setw(18) << entryText.str()
+            << name << '\n';
+    }
+    out << modules.size() << " module" << (modules.size() == 1 ? "" : "s") << ".\n";
+    return out.str();
+}
+
+// Заголовок модуля, таблица его секций и, если запрошены, таблицы экспорта
+// и импорта; при усечении списка отдельно сообщает о пределе в 4096 записей.
+std::string FormatModuleInfo(const nlohmann::json& result, bool includeExports, bool includeImports)
+{
+    std::ostringstream out;
+    const nlohmann::json module = result.value("module", nlohmann::json::object());
+    const std::string name = module.value("name", std::string());
+    const std::string path = module.value("path", std::string());
+
+    // Числовые поля модуля печатаются как "unavailable", если их нет в
+    // ответе плагина, вместо молчаливого нуля — иначе расхождение формата
+    // между плагином и мостом (как было с плоским/вложенным JSON) снова
+    // будет незаметно маскироваться нулями в тексте.
+    auto formatHexField = [&module](const char* field) -> std::string
+    {
+        if (!module.contains(field) || !module[field].is_number_integer())
+            return "unavailable";
+        std::ostringstream text;
+        text << "0x" << std::hex << module[field].get<std::uint64_t>();
+        return text.str();
+    };
+
+    out << (name.empty() ? "(unknown module)" : name)
+        << "  base=" << formatHexField("base")
+        << "  size=" << formatHexField("size")
+        << "  entry=" << formatHexField("entry");
+    if (!path.empty())
+        out << "  " << path;
+    out << "\n\n";
+
+    const nlohmann::json sections = result.value("sections", nlohmann::json::array());
+    out << "Sections:\n"
+        << std::left
+        << std::setw(18) << "Address"
+        << std::setw(12) << "Size"
+        << "Name" << '\n';
+    for (const auto& section : sections)
+    {
+        const std::uint64_t address = section.value("address", 0ULL);
+        const std::uint64_t sectionSize = section.value("size", 0ULL);
+        const std::string sectionName = section.value("name", std::string());
+
+        std::ostringstream addressText, sizeText;
+        addressText << "0x" << std::hex << address;
+        sizeText << "0x" << std::hex << sectionSize;
+
+        out << std::left
+            << std::setw(18) << addressText.str()
+            << std::setw(12) << sizeText.str()
+            << sectionName << '\n';
+    }
+
+    if (includeExports)
+    {
+        const nlohmann::json exports = result.value("exports", nlohmann::json::array());
+        out << "\nExports:\n"
+            << std::left
+            << std::setw(8) << "Ordinal"
+            << std::setw(18) << "RVA"
+            << std::setw(18) << "VA"
+            << "Name" << '\n';
+        for (const auto& exp : exports)
+        {
+            const unsigned int ordinal = exp.value("ordinal", 0u);
+            const std::uint64_t rva = exp.value("rva", 0ULL);
+            const std::uint64_t va = exp.value("va", 0ULL);
+            const bool forwarded = exp.value("forwarded", false);
+            const std::string exportName = exp.value("name", std::string());
+            const std::string forwardName = exp.value("forwardName", std::string());
+
+            std::ostringstream rvaText, vaText;
+            rvaText << "0x" << std::hex << rva;
+            vaText << "0x" << std::hex << va;
+
+            out << std::left
+                << std::setw(8) << ordinal
+                << std::setw(18) << rvaText.str()
+                << std::setw(18) << vaText.str()
+                << (forwarded ? (exportName + " -> " + forwardName) : exportName) << '\n';
+        }
+        if (result.value("exportsTruncated", false))
+            out << "Export list truncated at 4096 entries.\n";
+    }
+
+    if (includeImports)
+    {
+        const nlohmann::json imports = result.value("imports", nlohmann::json::array());
+        out << "\nImports:\n"
+            << std::left
+            << std::setw(18) << "IAT RVA"
+            << std::setw(18) << "IAT VA"
+            << std::setw(8) << "Ordinal"
+            << "Name" << '\n';
+        for (const auto& imp : imports)
+        {
+            const std::uint64_t iatRva = imp.value("iatRva", 0ULL);
+            const std::uint64_t iatVa = imp.value("iatVa", 0ULL);
+            const unsigned int ordinal = imp.value("ordinal", 0u);
+            const std::string importName = imp.value("name", std::string());
+
+            std::ostringstream rvaText, vaText;
+            rvaText << "0x" << std::hex << iatRva;
+            vaText << "0x" << std::hex << iatVa;
+
+            out << std::left
+                << std::setw(18) << rvaText.str()
+                << std::setw(18) << vaText.str()
+                << std::setw(8) << ordinal
+                << importName << '\n';
+        }
+        if (result.value("importsTruncated", false))
+            out << "Import list truncated at 4096 entries.\n";
+    }
+
+    return out.str();
+}
+
+// Выровненная таблица регионов памяти: база, размер, состояние, тип, права,
+// описание. В конце — число регионов и суммарный объём закреплённой (commit) памяти.
+std::string FormatMemoryMap(const nlohmann::json& regions)
+{
+    std::ostringstream out;
+    out << std::left
+        << std::setw(18) << "Base"
+        << std::setw(12) << "Size"
+        << std::setw(10) << "State"
+        << std::setw(10) << "Type"
+        << std::setw(8) << "Protect"
+        << "Info" << '\n';
+
+    std::uint64_t committedTotal = 0;
+    for (const auto& region : regions)
+    {
+        const std::uint64_t base = region.value("base", 0ULL);
+        const std::uint64_t size = region.value("size", 0ULL);
+        const std::string state = region.value("state", std::string());
+        const std::string type = region.value("type", std::string());
+        const std::string protect = region.value("protect", std::string());
+        const std::string info = region.value("info", std::string());
+
+        if (state == "commit")
+            committedTotal += size;
+
+        std::ostringstream baseText, sizeText;
+        baseText << "0x" << std::hex << base;
+        sizeText << "0x" << std::hex << size;
+
+        out << std::left
+            << std::setw(18) << baseText.str()
+            << std::setw(12) << sizeText.str()
+            << std::setw(10) << state
+            << std::setw(10) << type
+            << std::setw(8) << protect
+            << info << '\n';
+    }
+
+    out << regions.size() << " region" << (regions.size() == 1 ? "" : "s")
+        << ", 0x" << std::hex << committedTotal << " bytes committed.\n";
+    return out.str();
+}
+
+// Выровненная таблица потоков: идентификатор, текущий адрес, точка входа,
+// приоритет, причина ожидания, имя; текущий поток отмечен звёздочкой.
+std::string FormatThreadList(const nlohmann::json& threads)
+{
+    std::ostringstream out;
+    out << std::left
+        << std::setw(3) << ' '
+        << std::setw(10) << "ID"
+        << std::setw(18) << "CIP"
+        << std::setw(18) << "Entry"
+        << std::setw(10) << "Priority"
+        << std::setw(16) << "Wait reason"
+        << "Name" << '\n';
+
+    for (const auto& thread : threads)
+    {
+        const unsigned int id = thread.value("id", 0u);
+        const std::uint64_t cip = thread.value("cip", 0ULL);
+        const std::uint64_t entry = thread.value("entry", 0ULL);
+        const std::string priority = thread.value("priority", std::string());
+        const std::string waitReason = thread.value("waitReason", std::string());
+        const std::string name = thread.value("name", std::string());
+        const bool current = thread.value("current", false);
+
+        std::ostringstream cipText, entryText;
+        cipText << "0x" << std::hex << cip;
+        entryText << "0x" << std::hex << entry;
+
+        out << std::left
+            << std::setw(3) << (current ? "*" : " ")
+            << std::setw(10) << id
+            << std::setw(18) << cipText.str()
+            << std::setw(18) << entryText.str()
+            << std::setw(10) << priority
+            << std::setw(16) << waitReason
+            << name << '\n';
+    }
+    return out.str();
+}
+
 } // namespace
 
 void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> link)
@@ -882,6 +1115,203 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(listBreakpoints));
+
+    Tool listModules;
+    listModules.name = "list_modules";
+    listModules.description =
+        "List the modules loaded into the debugged process, each with its "
+        "base address, size, entry point, section count, and full path. "
+        "Call this tool EARLY in a reverse-engineering session to see what "
+        "the process is made of and to find the base address of a library "
+        "of interest: addresses reported by other tools (disassemble, "
+        "read_memory, breakpoints, call stacks) are matched against the "
+        "modules returned here to tell which module they belong to. "
+        "Returns every loaded module, including system libraries such as "
+        "ntdll.dll and kernel32.dll. Requires an active debugging session. "
+        "Takes no parameters.";
+    listModules.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", nlohmann::json::object()},
+        {"additionalProperties", false}
+    };
+    listModules.handler = [link](const nlohmann::json& /*arguments*/) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("list_modules: plugin link is not configured");
+
+        ToolResult result;
+        result.structuredContent = link->Call("modules.list", nlohmann::json::object());
+        const nlohmann::json modules = result.structuredContent.value("modules", nlohmann::json::array());
+        result.text = FormatModuleList(modules);
+        return result;
+    };
+    registry.Add(std::move(listModules));
+
+    Tool moduleInfo;
+    moduleInfo.name = "module_info";
+    moduleInfo.description =
+        "Report details about a single module: its sections with their "
+        "addresses and sizes, and, on request, its export and import "
+        "tables. Identify the module either by 'name' (its file name, e.g. "
+        "'ntdll.dll') or by 'address' (any address that falls inside it); "
+        "exactly one of the two must be given. Use this tool to find the "
+        "address of an exported function, to see the section layout before "
+        "a signature scan, or to see which system functions a module "
+        "imports. Exports and imports are NOT included by default, because "
+        "system libraries can have thousands of each; set "
+        "'include_exports' and/or 'include_imports' to true only when "
+        "those tables are actually needed. Each of the export and import "
+        "lists is truncated at 4096 entries; when that happens the "
+        "corresponding 'exportsTruncated' or 'importsTruncated' field in "
+        "the result is true and the human-readable output says so "
+        "explicitly. Requires an active debugging session; fails if no "
+        "module matches 'name' or 'address'.";
+    moduleInfo.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"name", {
+                {"type", "string"},
+                {"description",
+                 "File name of the module to inspect, e.g. 'ntdll.dll'. Accepted "
+                 "either with or without the file extension: the name reported by "
+                 "debugger_status has no extension (e.g. 'crackme'), while the name "
+                 "reported by list_modules has one (e.g. 'crackme.exe'); either form "
+                 "works here. Mutually exclusive with 'address'."}
+            }},
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Any address inside the module, given as a number (not a hex "
+                 "string). Mutually exclusive with 'name'."}
+            }},
+            {"include_exports", {
+                {"type", "boolean"},
+                {"default", false},
+                {"description", "Include the module's export table. Defaults to false; system libraries can export thousands of symbols."}
+            }},
+            {"include_imports", {
+                {"type", "boolean"},
+                {"default", false},
+                {"description", "Include the module's import table. Defaults to false; system libraries can import thousands of symbols."}
+            }}
+        }},
+        {"anyOf", nlohmann::json::array({
+            { {"required", nlohmann::json::array({"name"})} },
+            { {"required", nlohmann::json::array({"address"})} }
+        })},
+        {"additionalProperties", false}
+    };
+    moduleInfo.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("module_info: plugin link is not configured");
+
+        if (!arguments.contains("name") && !arguments.contains("address"))
+            throw ToolError("module_info: either 'name' or 'address' must be provided");
+
+        nlohmann::json params = nlohmann::json::object();
+        if (arguments.contains("name"))
+        {
+            if (!arguments["name"].is_string())
+                throw ToolError("module_info: 'name' must be a string");
+            params["name"] = arguments["name"].get<std::string>();
+        }
+        if (arguments.contains("address"))
+        {
+            RequireNonNegativeInteger(arguments, "address", "module_info");
+            params["address"] = arguments["address"].get<std::uint64_t>();
+        }
+        const bool includeExports = arguments.value("include_exports", false);
+        const bool includeImports = arguments.value("include_imports", false);
+        params["include_exports"] = includeExports;
+        params["include_imports"] = includeImports;
+
+        ToolResult result;
+        result.structuredContent = link->Call("module.info", params);
+        result.text = FormatModuleInfo(result.structuredContent, includeExports, includeImports);
+        return result;
+    };
+    registry.Add(std::move(moduleInfo));
+
+    Tool memoryMap;
+    memoryMap.name = "memory_map";
+    memoryMap.description =
+        "Report the memory map of the debugged process: every region with "
+        "its base address, size, state, type, and access protection. Use "
+        "it to find regions suitable for a signature scan, to spot "
+        "unpacked or dynamically generated code, or to find out why a "
+        "given address is not readable or writable. State 'commit' means "
+        "the range is allocated and backed by physical storage; 'reserve' "
+        "means the address range is reserved but has no physical memory "
+        "behind it yet; 'free' means the range is available for future "
+        "allocation. Type 'image' is memory belonging to a loaded module "
+        "image, 'mapped' is a memory-mapped file, and 'private' is "
+        "ordinary allocated memory not backed by any file. Private, "
+        "committed, and executable memory that is NOT part of any module "
+        "is a strong sign of unpacked or dynamically generated code — look "
+        "there first when the code of interest is not found in a loaded "
+        "module. Note: the 'info' field of each region is a free-text "
+        "description produced by x64dbg itself and follows the language of "
+        "its UI (for example, a Russian-language x64dbg build reports "
+        "Russian text there); do not rely on its exact wording when parsing "
+        "results. Requires an active debugging session. Takes no parameters.";
+    memoryMap.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", nlohmann::json::object()},
+        {"additionalProperties", false}
+    };
+    memoryMap.handler = [link](const nlohmann::json& /*arguments*/) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("memory_map: plugin link is not configured");
+
+        ToolResult result;
+        result.structuredContent = link->Call("memory.map", nlohmann::json::object());
+        const nlohmann::json regions = result.structuredContent.value("regions", nlohmann::json::array());
+        result.text = FormatMemoryMap(regions);
+        return result;
+    };
+    registry.Add(std::move(memoryMap));
+
+    Tool listThreads;
+    listThreads.name = "list_threads";
+    listThreads.description =
+        "List the threads of the debugged process, each with its "
+        "identifier, entry point, current instruction pointer, suspend "
+        "count, last error code, priority, and wait reason. The 'current' "
+        "field marks the thread whose context other tools (debugger_status, "
+        "read_memory, disassemble at the instruction pointer, step) "
+        "currently operate on. Use this tool when analyzing multi-threaded "
+        "programs and whenever it matters which thread is doing what, for "
+        "example to find a worker thread stuck waiting on a handle, or to "
+        "tell threads created by the target apart from threads injected by "
+        "protection code. Note: the 'name' field is a free-text description "
+        "produced by x64dbg itself and follows the language of its UI (for "
+        "example, a Russian-language x64dbg build reports Russian text "
+        "there); do not rely on its exact wording when parsing results. "
+        "Requires an active debugging session. Takes no parameters.";
+    listThreads.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", nlohmann::json::object()},
+        {"additionalProperties", false}
+    };
+    listThreads.handler = [link](const nlohmann::json& /*arguments*/) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("list_threads: plugin link is not configured");
+
+        ToolResult result;
+        result.structuredContent = link->Call("threads.list", nlohmann::json::object());
+        const nlohmann::json threads = result.structuredContent.value("threads", nlohmann::json::array());
+        result.text = FormatThreadList(threads);
+        return result;
+    };
+    registry.Add(std::move(listThreads));
 }
 
 } // namespace x64dbg_mcp::bridge

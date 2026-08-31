@@ -137,6 +137,92 @@ std::string BpxTypeToString(BPXTYPE type)
     }
 }
 
+std::string MemStateToString(DWORD state)
+{
+    switch (state)
+    {
+    case MEM_COMMIT: return "commit";
+    case MEM_RESERVE: return "reserve";
+    case MEM_FREE: return "free";
+    default: return "unknown";
+    }
+}
+
+std::string MemTypeToString(DWORD type)
+{
+    switch (type)
+    {
+    case MEM_IMAGE: return "image";
+    case MEM_MAPPED: return "mapped";
+    case MEM_PRIVATE: return "private";
+    default: return "unknown";
+    }
+}
+
+// Названия элементов взяты дословно из THREADPRIORITY (bridgemain.h) без
+// ведущего подчёркивания.
+std::string ThreadPriorityToString(THREADPRIORITY priority)
+{
+    switch (priority)
+    {
+    case _PriorityIdle: return "Idle";
+    case _PriorityAboveNormal: return "AboveNormal";
+    case _PriorityBelowNormal: return "BelowNormal";
+    case _PriorityHighest: return "Highest";
+    case _PriorityLowest: return "Lowest";
+    case _PriorityNormal: return "Normal";
+    case _PriorityTimeCritical: return "TimeCritical";
+    default: return "Unknown";
+    }
+}
+
+// Названия элементов взяты дословно из THREADWAITREASON (bridgemain.h) без
+// ведущего подчёркивания.
+std::string ThreadWaitReasonToString(THREADWAITREASON reason)
+{
+    switch (reason)
+    {
+    case _Executive: return "Executive";
+    case _FreePage: return "FreePage";
+    case _PageIn: return "PageIn";
+    case _PoolAllocation: return "PoolAllocation";
+    case _DelayExecution: return "DelayExecution";
+    case _Suspended: return "Suspended";
+    case _UserRequest: return "UserRequest";
+    case _WrExecutive: return "WrExecutive";
+    case _WrFreePage: return "WrFreePage";
+    case _WrPageIn: return "WrPageIn";
+    case _WrPoolAllocation: return "WrPoolAllocation";
+    case _WrDelayExecution: return "WrDelayExecution";
+    case _WrSuspended: return "WrSuspended";
+    case _WrUserRequest: return "WrUserRequest";
+    case _WrEventPair: return "WrEventPair";
+    case _WrQueue: return "WrQueue";
+    case _WrLpcReceive: return "WrLpcReceive";
+    case _WrLpcReply: return "WrLpcReply";
+    case _WrVirtualMemory: return "WrVirtualMemory";
+    case _WrPageOut: return "WrPageOut";
+    case _WrRendezvous: return "WrRendezvous";
+    case _Spare2: return "Spare2";
+    case _Spare3: return "Spare3";
+    case _Spare4: return "Spare4";
+    case _Spare5: return "Spare5";
+    case _WrCalloutStack: return "WrCalloutStack";
+    case _WrKernel: return "WrKernel";
+    case _WrResource: return "WrResource";
+    case _WrPushLock: return "WrPushLock";
+    case _WrMutex: return "WrMutex";
+    case _WrQuantumEnd: return "WrQuantumEnd";
+    case _WrDispatchInt: return "WrDispatchInt";
+    case _WrPreempted: return "WrPreempted";
+    case _WrYieldExecution: return "WrYieldExecution";
+    case _WrFastMutex: return "WrFastMutex";
+    case _WrGuardedMutex: return "WrGuardedMutex";
+    case _WrRundown: return "WrRundown";
+    default: return "Unknown";
+    }
+}
+
 } // namespace
 
 DebuggerStatus GetStatus()
@@ -786,6 +872,244 @@ bool ListBreakpoints(std::vector<BreakpointInfo>& out, std::string& error)
     {
         out.clear();
         error = "Internal error while listing breakpoints";
+        return false;
+    }
+}
+
+bool ListModules(std::vector<ModuleEntry>& out, std::string& error)
+{
+    out.clear();
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        // BridgeList сам чистит и освобождает свои данные в деструкторе —
+        // вручную освобождать список модулей не нужно.
+        BridgeList<Script::Module::ModuleInfo> modules;
+        if (!Script::Module::GetList(&modules))
+        {
+            error = "Failed to retrieve the module list";
+            return false;
+        }
+
+        out.reserve(modules.Count());
+        for (int i = 0; i < modules.Count(); ++i)
+        {
+            const auto& mod = modules[i];
+            ModuleEntry entry;
+            entry.base = static_cast<unsigned long long>(mod.base);
+            entry.size = static_cast<unsigned long long>(mod.size);
+            entry.entry = static_cast<unsigned long long>(mod.entry);
+            entry.sectionCount = mod.sectionCount;
+            entry.name = mod.name;
+            entry.path = mod.path;
+            out.push_back(std::move(entry));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        error = "Internal error while listing modules";
+        return false;
+    }
+}
+
+bool GetModuleDetails(const std::string& name, unsigned long long address, bool byAddress,
+                      bool includeExports, bool includeImports,
+                      ModuleDetails& out, std::string& error)
+{
+    out = ModuleDetails{};
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        Script::Module::ModuleInfo info = {};
+        const bool found = byAddress
+            ? Script::Module::InfoFromAddr(static_cast<duint>(address), &info)
+            : Script::Module::InfoFromName(name.c_str(), &info);
+        if (!found)
+        {
+            error = byAddress
+                ? "No loaded module contains the given address"
+                : "Module \"" + name + "\" is not loaded";
+            return false;
+        }
+
+        out.module.base = static_cast<unsigned long long>(info.base);
+        out.module.size = static_cast<unsigned long long>(info.size);
+        out.module.entry = static_cast<unsigned long long>(info.entry);
+        out.module.sectionCount = info.sectionCount;
+        out.module.name = info.name;
+        out.module.path = info.path;
+
+        // BridgeList сам чистит и освобождает свои данные в деструкторе.
+        BridgeList<Script::Module::ModuleSectionInfo> sections;
+        if (Script::Module::SectionListFromName(info.name, &sections))
+        {
+            out.sections.reserve(sections.Count());
+            for (int i = 0; i < sections.Count(); ++i)
+            {
+                SectionEntry section;
+                section.address = static_cast<unsigned long long>(sections[i].addr);
+                section.size = static_cast<unsigned long long>(sections[i].size);
+                section.name = sections[i].name;
+                out.sections.push_back(std::move(section));
+            }
+        }
+
+        if (includeExports)
+        {
+            BridgeList<Script::Module::ModuleExport> exports;
+            if (Script::Module::GetExports(&info, &exports))
+            {
+                const int count = exports.Count();
+                const int limit = count > static_cast<int>(kMaxExports) ? static_cast<int>(kMaxExports) : count;
+                out.exportsTruncated = count > static_cast<int>(kMaxExports);
+                out.exports.reserve(limit);
+                for (int i = 0; i < limit; ++i)
+                {
+                    ExportEntry item;
+                    item.ordinal = static_cast<unsigned long long>(exports[i].ordinal);
+                    item.rva = static_cast<unsigned long long>(exports[i].rva);
+                    item.va = static_cast<unsigned long long>(exports[i].va);
+                    item.forwarded = exports[i].forwarded;
+                    item.name = exports[i].name;
+                    item.forwardName = exports[i].forwardName;
+                    out.exports.push_back(std::move(item));
+                }
+            }
+        }
+
+        if (includeImports)
+        {
+            BridgeList<Script::Module::ModuleImport> imports;
+            if (Script::Module::GetImports(&info, &imports))
+            {
+                const int count = imports.Count();
+                const int limit = count > static_cast<int>(kMaxImports) ? static_cast<int>(kMaxImports) : count;
+                out.importsTruncated = count > static_cast<int>(kMaxImports);
+                out.imports.reserve(limit);
+                for (int i = 0; i < limit; ++i)
+                {
+                    ImportEntry item;
+                    item.iatRva = static_cast<unsigned long long>(imports[i].iatRva);
+                    item.iatVa = static_cast<unsigned long long>(imports[i].iatVa);
+                    item.ordinal = static_cast<unsigned long long>(imports[i].ordinal);
+                    item.name = imports[i].name;
+                    out.imports.push_back(std::move(item));
+                }
+            }
+        }
+
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while retrieving module details";
+        return false;
+    }
+}
+
+bool GetMemoryMap(std::vector<MemoryRegion>& out, std::string& error)
+{
+    out.clear();
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        MEMMAP memoryMap = {};
+        if (!DbgMemMap(&memoryMap))
+        {
+            error = "Failed to retrieve the memory map";
+            return false;
+        }
+
+        // DbgMemMap выделяет memoryMap.page через BridgeAlloc, а не через
+        // ListInfo/BridgeList — освобождать нужно вручную, как это делает
+        // эталонный потребитель этой функции,
+        // external/x64dbg/src/gui/Src/Gui/MemoryMapView.cpp.
+        struct MapGuard
+        {
+            MEMMAP* map;
+            ~MapGuard() { if (map->page) BridgeFree(map->page); }
+        } guard{&memoryMap};
+
+        out.reserve(memoryMap.count);
+        for (int i = 0; i < memoryMap.count; ++i)
+        {
+            const MEMPAGE& page = memoryMap.page[i];
+            MemoryRegion region;
+            region.base = static_cast<unsigned long long>(reinterpret_cast<duint>(page.mbi.BaseAddress));
+            region.allocationBase = static_cast<unsigned long long>(reinterpret_cast<duint>(page.mbi.AllocationBase));
+            region.size = static_cast<unsigned long long>(page.mbi.RegionSize);
+            region.state = MemStateToString(page.mbi.State);
+            region.type = MemTypeToString(page.mbi.Type);
+
+            char rights[RIGHTS_STRING_SIZE] = {};
+            if (DbgFunctions()->PageRightsToString(page.mbi.Protect, rights))
+                region.protect = rights;
+
+            region.info = page.info;
+            out.push_back(std::move(region));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        error = "Internal error while retrieving the memory map";
+        return false;
+    }
+}
+
+bool ListThreads(std::vector<ThreadEntry>& out, std::string& error)
+{
+    out.clear();
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        THREADLIST threadList = {};
+        DbgGetThreadList(&threadList);
+
+        // DbgGetThreadList выделяет threadList.list через BridgeAlloc;
+        // эталонный потребитель — external/x64dbg/src/gui/Src/Gui/ThreadView.cpp —
+        // освобождает результат через BridgeFree, поэтому делаем так же.
+        struct ListGuard
+        {
+            THREADLIST* list;
+            ~ListGuard() { if (list->list) BridgeFree(list->list); }
+        } guard{&threadList};
+
+        out.reserve(threadList.count);
+        for (int i = 0; i < threadList.count; ++i)
+        {
+            const THREADALLINFO& info = threadList.list[i];
+            ThreadEntry entry;
+            entry.id = static_cast<unsigned int>(info.BasicInfo.ThreadId);
+            entry.number = info.BasicInfo.ThreadNumber;
+            entry.entry = static_cast<unsigned long long>(info.BasicInfo.ThreadStartAddress);
+            entry.teb = static_cast<unsigned long long>(info.BasicInfo.ThreadLocalBase);
+            entry.cip = static_cast<unsigned long long>(info.ThreadCip);
+            entry.suspendCount = static_cast<unsigned int>(info.SuspendCount);
+            entry.lastError = static_cast<unsigned int>(info.LastError);
+            entry.name = info.BasicInfo.threadName;
+            entry.priority = ThreadPriorityToString(info.Priority);
+            entry.waitReason = ThreadWaitReasonToString(info.WaitReason);
+            entry.current = (i == threadList.CurrentThread);
+            out.push_back(std::move(entry));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        error = "Internal error while listing threads";
         return false;
     }
 }
