@@ -3,17 +3,18 @@
 An MCP server for the [x64dbg](https://x64dbg.com/) debugger. It gives an AI agent access to live debugging and reverse engineering: inspecting process state, reading memory, disassembling code, controlling execution, and managing breakpoints.
 
 ![x64dbg with the x64dbg-mcp plugin loaded](docs/images/screenshot.png)
-<!-- TODO: add docs/images/screenshot.png -->
 
 ## What it can do
 
 - Inspect the debugger state: whether a session exists, running or paused, process and thread IDs, pointer size, current instruction pointer.
-- Read raw memory and disassemble instructions, both with human-readable formatting.
-- Control execution: run, pause, stop, restart, run to an address, and step into/over/out.
+- Read raw memory, disassemble code, and read strings, all with human-readable formatting alongside the structured data.
+- Control execution: run, pause, stop, restart, run to an address, step into/over/out, and run until the program's own code is reached again.
 - Set, manage, and list breakpoints, software, hardware, and memory, with conditions and logging.
-- List loaded modules and report a module sections, exports, and imports.
-- Report the process memory map and enumerate its threads.
-- Read CPU registers with decoded flags, reconstruct the call stack, and inspect the contents of the stack.
+- Trace execution and record code coverage, so analyzing packed or obfuscated code does not need one round trip per instruction.
+- Search memory for byte patterns and list cross-references to an address.
+- List loaded modules, the memory map, threads, open handles, windows, and network connections.
+- Write to the debuggee: patch memory, assemble instructions in place, change registers, and run arbitrary x64dbg commands and scripts.
+- Read and write the debugger's own labels, comments, and bookmarks, so a finding persists across sessions.
 
 ## Example
 
@@ -111,34 +112,132 @@ The server can be started before x64dbg: the connection to the plugin is establi
 
 ## Tools
 
+### Session and state
+
+Whether the server and the debugger are reachable, and what the debuggee is currently doing.
+
 | Tool | What it does |
 |---|---|
 | `server_status` | Reports whether the server is connected to the x64dbg plugin. |
 | `debugger_status` | Reports whether a debugging session exists, running or paused, PID/TID, pointer size, current instruction pointer, and module. |
+| `wait_until_paused` | Waits for the debuggee to reach a paused state. |
+
+### Reading memory and code
+
+Inspecting data, instructions, and the current call context without changing anything.
+
+| Tool | What it does |
+|---|---|
 | `read_memory` | Reads raw bytes from the debuggee memory, up to 1 MiB per call, with a hex dump. |
 | `disassemble` | Disassembles up to 256 instructions starting at an address, with symbols already resolved. |
+| `disassemble_function` | Disassembles an entire function, using the debugger's own analysis of its boundaries. |
+| `read_string` | Reads the string at a memory address, ASCII or UTF-16, decoded the way the debugger would show it. |
+| `read_stack` | Reads machine words from the top of the stack together with the debugger's annotations for them. |
+| `call_stack` | Reconstructs the chain of calls that led to the current instruction, with return addresses and resolved symbols. |
+| `read_registers` | Reads the CPU registers of the paused debuggee: general purpose, segment, debug, and the flags register with individual flags decoded. |
+| `evaluate_expression` | Evaluates an expression in x64dbg's expression language and reports its value. |
+| `find_pattern` | Searches the debuggee memory for a byte signature, with masks. |
+| `find_references` | Lists the places that reference a given address. |
+
+### Execution control
+
+Running, stopping, and stepping the debuggee.
+
+| Tool | What it does |
+|---|---|
 | `debug_control` | Runs, pauses, stops, restarts the debuggee, or runs to a chosen address. |
 | `step` | Steps into, over, or out of the current instruction, one or many steps per call. |
-| `wait_until_paused` | Waits for the debuggee to reach a paused state. |
+| `run_to_user_code` | Resumes execution until control returns to the program's own code, skipping system library code. |
+
+### Breakpoints
+
+Setting and managing software, hardware, and memory breakpoints.
+
+| Tool | What it does |
+|---|---|
 | `set_breakpoint` | Sets a software, hardware, or memory breakpoint, optionally conditional or logging. |
 | `manage_breakpoint` | Deletes, enables, or disables an existing breakpoint. |
 | `list_breakpoints` | Lists every breakpoint with its type, state, hit count, and name. |
+
+### Process and module layout
+
+The shape of the debuggee: its modules, memory, and threads.
+
+| Tool | What it does |
+|---|---|
 | `list_modules` | Lists loaded modules with base address, size, entry point, and path. |
-| `module_info` | Reports a module sections and, on request, its export and import tables. |
+| `module_info` | Reports a module's sections and, on request, its export and import tables. |
 | `memory_map` | Reports the process memory map: regions, state, type, and access protection. |
 | `list_threads` | Lists the debuggee threads with their state and which one is current. |
-| `read_registers` | Reads the CPU registers of the paused debuggee: general purpose, segment, debug, and the flags register with individual flags decoded. |
-| `call_stack` | Reconstructs the chain of calls that led to the current instruction, with return addresses and resolved symbols. |
-| `read_stack` | Reads machine words from the top of the stack together with the debugger's annotations for them. |
+
+### Symbols and annotations
+
+Naming things, and finding things that are already named.
+
+| Tool | What it does |
+|---|---|
+| `list_symbols` | Lists a module's symbols — imports, exports, and debug information — with an optional name filter. |
+| `annotate` | Reads or writes the debugger's own labels, comments, and bookmarks at an address. |
+
+### Writing and patching
+
+Changing the debuggee's memory, registers, and page protection.
+
+| Tool | What it does |
+|---|---|
+| `write_memory` | Writes raw bytes into the debuggee memory, recorded as an undoable patch by default. |
+| `set_register` | Sets a register, or any debugger variable, to a given value. |
+| `assemble_at` | Assembles one instruction and writes it at the given address. |
+| `patches` | Lists recorded patches, restores them, or writes them into a copy of the file on disk. |
+| `set_page_rights` | Changes the memory protection of the region containing an address. |
+
+### Tracing and coverage
+
+Running long stretches of the debuggee inside x64dbg itself instead of one MCP call per instruction.
+
+| Tool | What it does |
+|---|---|
+| `trace_until` | Steps the debuggee one instruction at a time inside the debugger until a condition is met or a step limit is reached. |
+| `trace_record` | Starts or stops recording every instruction the debuggee executes to a trace file. |
+| `code_coverage` | Records which addresses were executed and how many times, then reads the counts back. |
+
+### Commands and scripting
+
+A fallback for anything not covered by a dedicated tool.
+
+| Tool | What it does |
+|---|---|
+| `execute_command` | Runs any x64dbg command and returns whatever the debugger printed. |
+| `run_script` | Runs an x64dbg script given as text. |
+| `read_log` | Returns the most recent lines of the x64dbg log. |
+
+### Process environment
+
+What the debuggee has opened outside its own memory: kernel objects, windows, and network connections.
+
+| Tool | What it does |
+|---|---|
+| `list_handles` | Lists the kernel objects the debuggee currently has open: files, registry keys, mutexes, events, and more. |
+| `list_windows` | Lists the windows belonging to the debuggee, with their window procedure address. |
+| `list_connections` | Lists the debuggee's active TCP connections. |
+| `seh_chain` | Shows the chain of structured exception handlers registered for the current thread. |
 
 ## Security and risks
 
-This server gives the model full access to the debugger: reading memory, controlling execution, and setting breakpoints, with writing memory and running arbitrary x64dbg commands planned for later. Please read this before pointing it at anything important:
+This server gives the model full access to the debugger: reading memory, controlling execution, setting breakpoints, and, just as much, writing to the debuggee — patching memory, assembling instructions, changing registers, and running arbitrary x64dbg commands and scripts in the debuggee's own context. Please read this before pointing it at anything important:
 
 - Only debug code you are prepared to lose, and preferably do it in an isolated environment: the debuggee actually runs, it is not simulated.
 - The named pipe is restricted to the owner of the session and the system; remote connections are rejected.
 - The model can make mistakes. It can pause, modify, or terminate the debugged process.
 - Responsibility for what is being debugged rests with the user, not the tool.
+
+## Compatibility
+
+The plugin is built against the x64dbg plugin SDK and loads into recent x64dbg releases.
+
+- The plugin links only against SDK functions that the debugger's `x64bridge.dll` exports directly. If a build of x64dbg is missing a function the plugin references, the whole plugin fails to load — Windows refuses to resolve the DLL's import table, x64dbg shows an entry-point error dialog, and none of the tools are available, not just the one that used the missing function. This is why the project deliberately restricts itself to long-established SDK exports.
+- Some features are reached instead through the SDK's `DbgFunctions()` function-pointer table, which is resolved at run time rather than imported. Those are checked for availability before use and report a plain "not supported by this x64dbg build" error instead of crashing or failing to load.
+- The plugin's imports were checked against the export table of x64dbg 2025.08.19, and it is built against the 2026.05.27 plugin SDK. If the plugin fails to load with an entry-point error, the fix is to update x64dbg.
 
 ## Building from source
 
@@ -174,7 +273,7 @@ The C runtime is linked statically, so there is nothing extra to redistribute al
 
 ## Limitations
 
-Not implemented yet: writing to or patching memory, running arbitrary x64dbg commands or scripts, execution tracing and code coverage, byte-pattern signature search, cross-references, and MCP resources. These are planned; see `docs/tools.md` for the full roadmap.
+Not implemented yet: MCP resources and prompts (the disassembly and memory-map resources, the x64dbg command reference resource, and the scenario prompts described in `docs/tools.md`), attaching x64dbg to an already-running process from these tools (a debugging session still has to be started or attached by hand in x64dbg first), dumping a memory region straight to a file, a function's control-flow graph, and configuring the log text and condition used during tracing. A handful of convenience tools that would bundle several existing calls into one — a post-halt snapshot, a one-call function breakdown, searching for immediate values, and a registers diff — are also planned but not built. Deliberately out of scope for now: working with types and structures, graphical interaction, managing x64dbg windows, and source-level debugging. See `docs/tools.md` for the full roadmap.
 
 ## License
 

@@ -106,7 +106,12 @@ std::string BuildErrorResponse(const nlohmann::json& id, ipc::ErrorCode code, co
         {ipc::kFieldErrorCode, static_cast<int>(code)},
         {ipc::kFieldErrorMessage, message}
     };
-    return response.dump();
+    // dump()'s default strict UTF-8 mode THROWS on invalid UTF-8 instead of
+    // returning a string, which would take down the WHOLE response over a
+    // single bad byte sequence — e.g. a window title cut mid-multi-byte
+    // sequence by a fixed-size debugger buffer. Replacing invalid sequences
+    // with U+FFFD keeps the response, and every other field in it, alive.
+    return response.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
 std::string BuildOkResponse(const nlohmann::json& id, const nlohmann::json& result)
@@ -115,7 +120,9 @@ std::string BuildOkResponse(const nlohmann::json& id, const nlohmann::json& resu
     response[ipc::kFieldId] = id;
     response[ipc::kFieldOk] = true;
     response[ipc::kFieldResult] = result;
-    return response.dump();
+    // See the comment in BuildErrorResponse: strict UTF-8 dump() is not
+    // acceptable here either, for the same reason.
+    return response.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
 // Translates a DebuggerWorker::Submit result into a protocol error code and
@@ -1927,6 +1934,171 @@ std::string HandleCoverageRead(DebuggerWorker& worker, const nlohmann::json& id,
     return BuildOkResponse(id, result);
 }
 
+struct ListHandlesOutcome
+{
+    bool ok = false;
+    std::vector<HandleEntry> handles;
+    bool truncated = false;
+    bool namesIncomplete = false;
+    std::string error;
+};
+
+std::string HandleProcessHandles(DebuggerWorker& worker, const nlohmann::json& id)
+{
+    auto outcome = std::make_shared<ListHandlesOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome] { outcome->ok = ListHandles(outcome->handles, outcome->truncated, outcome->namesIncomplete, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& handle : outcome->handles)
+    {
+        nlohmann::json item;
+        item["handle"] = handle.handle;
+        item["typeNumber"] = handle.typeNumber;
+        item["grantedAccess"] = handle.grantedAccess;
+        item["typeName"] = handle.typeName;
+        item["name"] = handle.name;
+        list.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["handles"] = list;
+    result["truncated"] = outcome->truncated;
+    result["namesIncomplete"] = outcome->namesIncomplete;
+    return BuildOkResponse(id, result);
+}
+
+struct ListWindowsOutcome
+{
+    bool ok = false;
+    std::vector<WindowEntry> windows;
+    bool truncated = false;
+    std::string error;
+};
+
+std::string HandleProcessWindows(DebuggerWorker& worker, const nlohmann::json& id)
+{
+    auto outcome = std::make_shared<ListWindowsOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome] { outcome->ok = ListWindows(outcome->windows, outcome->truncated, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& window : outcome->windows)
+    {
+        nlohmann::json item;
+        item["handle"] = window.handle;
+        item["parent"] = window.parent;
+        item["wndProc"] = window.wndProc;
+        item["threadId"] = window.threadId;
+        item["style"] = window.style;
+        item["styleEx"] = window.styleEx;
+        item["enabled"] = window.enabled;
+        item["left"] = window.left;
+        item["top"] = window.top;
+        item["right"] = window.right;
+        item["bottom"] = window.bottom;
+        item["title"] = window.title;
+        item["className"] = window.className;
+        list.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["windows"] = list;
+    result["truncated"] = outcome->truncated;
+    return BuildOkResponse(id, result);
+}
+
+struct ListConnectionsOutcome
+{
+    bool ok = false;
+    std::vector<ConnectionEntry> connections;
+    bool truncated = false;
+    std::string error;
+};
+
+std::string HandleProcessConnections(DebuggerWorker& worker, const nlohmann::json& id)
+{
+    auto outcome = std::make_shared<ListConnectionsOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome] { outcome->ok = ListConnections(outcome->connections, outcome->truncated, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& connection : outcome->connections)
+    {
+        nlohmann::json item;
+        item["remoteAddress"] = connection.remoteAddress;
+        item["remotePort"] = connection.remotePort;
+        item["localAddress"] = connection.localAddress;
+        item["localPort"] = connection.localPort;
+        item["state"] = connection.state;
+        list.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["connections"] = list;
+    result["truncated"] = outcome->truncated;
+    return BuildOkResponse(id, result);
+}
+
+struct GetSehChainOutcome
+{
+    bool ok = false;
+    std::vector<SehEntry> entries;
+    std::string error;
+};
+
+std::string HandleProcessSehChain(DebuggerWorker& worker, const nlohmann::json& id)
+{
+    auto outcome = std::make_shared<GetSehChainOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome] { outcome->ok = GetSehChain(outcome->entries, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& entry : outcome->entries)
+    {
+        nlohmann::json item;
+        item["address"] = entry.address;
+        item["handler"] = entry.handler;
+        list.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["entries"] = list;
+    return BuildOkResponse(id, result);
+}
+
 // Debug state callbacks. Run on x64dbg's own debugger threads, so they must
 // be as short as possible and never throw: DebugStateTracker itself never throws.
 void CbInitDebug(CBTYPE, void*) { McpService::Instance().Tracker().NotifyDebugStarted(); }
@@ -2138,6 +2310,14 @@ std::string McpService::HandleRequest(const std::string& request)
         return HandleAnnotationsGet(worker_, id, params);
     if (method == "annotations.set")
         return HandleAnnotationsSet(worker_, id, params);
+    if (method == "process.handles")
+        return HandleProcessHandles(worker_, id);
+    if (method == "process.windows")
+        return HandleProcessWindows(worker_, id);
+    if (method == "process.connections")
+        return HandleProcessConnections(worker_, id);
+    if (method == "process.seh_chain")
+        return HandleProcessSehChain(worker_, id);
 
     return BuildErrorResponse(id, ipc::ErrorCode::UnknownMethod, "Unknown method: " + method);
 }

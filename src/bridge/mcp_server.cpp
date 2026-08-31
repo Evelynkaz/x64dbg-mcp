@@ -73,6 +73,14 @@ int ComputeMaxNestingDepth(const std::string& line)
     return maxDepth;
 }
 
+// Every response serialized below with .dump() passes
+// error_handler_t::replace instead of the strict default. Data crossing
+// this boundary (tool results, table text) originates in a debugged,
+// possibly hostile process, so a single malformed UTF-8 string must
+// degrade to U+FFFD in that one field, never throw and destroy the whole
+// response — the strict default previously turned a window with a
+// non-ASCII title into a bare, undiagnosable "Internal error" for the
+// entire list_windows call.
 nlohmann::json MakeErrorResponse(const nlohmann::json& id, int code, const std::string& message,
                                   const nlohmann::json& data = nullptr)
 {
@@ -195,7 +203,9 @@ nlohmann::json McpServer::HandleToolsCall(const nlohmann::json& params) const
     try
     {
         const ToolResult result = tool->handler(arguments);
-        const std::string text = result.text.empty() ? result.structuredContent.dump(2) : result.text;
+        const std::string text = result.text.empty()
+            ? result.structuredContent.dump(2, ' ', false, nlohmann::json::error_handler_t::replace)
+            : result.text;
         return nlohmann::json{
             {"content", nlohmann::json::array({
                 { {"type", "text"}, {"text", text} }
@@ -245,10 +255,10 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
     // memory before parsing reports an error — this has to be checked on
     // the raw text, we cannot rely on the parser itself here.
     if (line.size() > kMaxMessageBytes)
-        return MakeErrorResponse(nullptr, -32600, "Invalid Request: message too large").dump();
+        return MakeErrorResponse(nullptr, -32600, "Invalid Request: message too large").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
     if (ComputeMaxNestingDepth(line) > kMaxNestingDepth)
-        return MakeErrorResponse(nullptr, -32600, "Invalid Request: message nesting too deep").dump();
+        return MakeErrorResponse(nullptr, -32600, "Invalid Request: message nesting too deep").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
     // The request id is declared before the try block and used in the outer
     // catch — otherwise a -32603 error with an already-parsed id would go
@@ -265,10 +275,10 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
     {
         const nlohmann::json msg = nlohmann::json::parse(line, nullptr, false);
         if (msg.is_discarded())
-            return MakeErrorResponse(nullptr, -32700, "Parse error").dump();
+            return MakeErrorResponse(nullptr, -32700, "Parse error").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
         if (!msg.is_object())
-            return MakeErrorResponse(nullptr, -32600, "Invalid Request").dump();
+            return MakeErrorResponse(nullptr, -32600, "Invalid Request").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
         id = msg.contains("id") ? msg["id"] : nlohmann::json(nullptr);
         const bool isNotification = !msg.contains("id");
@@ -276,10 +286,10 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
         // JSON-RPC 2.0 only allows a string, a number, or null for id. A
         // strict client would be unable to match any other type to its request.
         if (!id.is_null() && !id.is_string() && !id.is_number())
-            return MakeErrorResponse(nullptr, -32600, "Invalid Request: id must be a string, number, or null").dump();
+            return MakeErrorResponse(nullptr, -32600, "Invalid Request: id must be a string, number, or null").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
         if (!msg.contains("method") || !msg["method"].is_string())
-            return MakeErrorResponse(id, -32600, "Invalid Request").dump();
+            return MakeErrorResponse(id, -32600, "Invalid Request").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
         const std::string method = msg["method"].get<std::string>();
         const nlohmann::json params = msg.value("params", nlohmann::json::object());
@@ -310,14 +320,14 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
             {
                 return MakeErrorResponse(id, -32602,
                     std::string("Missing required field params._meta[\"") +
-                    kMetaProtocolVersion + "\"]").dump();
+                    kMetaProtocolVersion + "\"]").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
             }
 
             if (!meta.contains(kMetaClientCapabilities) || !meta[kMetaClientCapabilities].is_object())
             {
                 return MakeErrorResponse(id, -32602,
                     std::string("params._meta[\"") + kMetaClientCapabilities +
-                    "\"] must be present and must be an object").dump();
+                    "\"] must be present and must be an object").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
             }
 
             const std::string requestedVersion = meta[kMetaProtocolVersion].get<std::string>();
@@ -334,7 +344,7 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
                     {"supported", supported},
                     {"requested", requestedVersion}
                 };
-                return MakeErrorResponse(id, -32022, "Unsupported protocol version", data).dump();
+                return MakeErrorResponse(id, -32022, "Unsupported protocol version", data).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
             }
 
             nlohmann::json result;
@@ -352,14 +362,14 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
                 }
                 catch (const ProtocolError& e)
                 {
-                    return MakeErrorResponse(id, e.code, e.message).dump();
+                    return MakeErrorResponse(id, e.code, e.message).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
                 }
             }
             else
-                return MakeErrorResponse(id, -32601, "Method not found: " + method).dump();
+                return MakeErrorResponse(id, -32601, "Method not found: " + method).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
             ApplyModernEnvelope(result);
-            return MakeResultResponse(id, result).dump();
+            return MakeResultResponse(id, result).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
         }
 
         // Legacy model.
@@ -387,32 +397,37 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
                 {"capabilities", {{"tools", nlohmann::json::object()}}},
                 {"serverInfo", BuildServerInfo()}
             };
-            return MakeResultResponse(id, result).dump();
+            return MakeResultResponse(id, result).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
         }
 
         if (method == "tools/list")
-            return MakeResultResponse(id, HandleToolsList()).dump();
+            return MakeResultResponse(id, HandleToolsList()).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
         if (method == "ping")
-            return MakeResultResponse(id, nlohmann::json::object()).dump();
+            return MakeResultResponse(id, nlohmann::json::object()).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
         if (method == "tools/call")
         {
             try
             {
-                return MakeResultResponse(id, HandleToolsCall(params)).dump();
+                return MakeResultResponse(id, HandleToolsCall(params)).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
             }
             catch (const ProtocolError& e)
             {
-                return MakeErrorResponse(id, e.code, e.message).dump();
+                return MakeErrorResponse(id, e.code, e.message).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
             }
         }
 
-        return MakeErrorResponse(id, -32601, "Method not found: " + method).dump();
+        return MakeErrorResponse(id, -32601, "Method not found: " + method).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+    }
+    catch (const std::exception& e)
+    {
+        return MakeErrorResponse(id, -32603, std::string("Internal error: ") + e.what())
+            .dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     }
     catch (...)
     {
-        return MakeErrorResponse(id, -32603, "Internal error").dump();
+        return MakeErrorResponse(id, -32603, "Internal error").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     }
 }
 

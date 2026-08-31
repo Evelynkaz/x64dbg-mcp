@@ -62,3 +62,52 @@ line — it should show `access=GRANTED` instead of `access=DENIED`.
 The built `crackme.exe` is deliberately not stored in the repository — it
 is built locally with the command above and is a working (disposable)
 artifact for manual testing.
+
+# envtarget — a test subject program for the process-environment tools
+
+## Why this exists
+
+`envtarget.exe` provides known correct answers for `list_handles`,
+`list_windows` and `list_connections`. Like `crackme.exe`, it prints
+reference values on startup and does not exit on its own — it runs a real
+message loop so a debugger can attach or run it.
+
+**Critically, its window title is a regression check for a heap
+out-of-bounds read that was fixed in `ListWindows()`.** The debugger fills
+`WINDOW_INFO::windowTitle` (a 512-byte buffer, see
+`external/x64dbg/src/dbg/handles.cpp`) with a plain `memcpy` and gives no
+guarantee of a trailing null terminator when the UTF-8 title is long enough
+to fill the buffer exactly. Before the fix, constructing a `std::string`
+directly from that buffer ran past the end of the debugger's allocation —
+an access violation that MSVC's `catch (...)` does not intercept, which
+therefore crashes and terminates x64dbg entirely. `envtarget.exe`'s window
+title is ~200 CJK characters, whose UTF-8 form is printed at startup and
+must be greater than 512 bytes for this check to be meaningful.
+
+## Build
+
+```
+cmake -B build64 -A x64 -DX64DBG_MCP_BUILD_TARGET=ON
+cmake --build build64 --config Release --target envtarget
+```
+
+The resulting file will be at `build64\Release\envtarget.exe`.
+
+## Target table
+
+| Target | How to verify | Correct answer |
+| --- | --- | --- |
+| Long window title (~200 CJK characters, UTF-8 form > 512 bytes) | `list_windows`, read the `title` field for `envtarget`'s window | The tool must not crash x64dbg and must return the title without reading past the unterminated 512-byte buffer — this is the regression check for the fixed heap out-of-bounds read |
+| Long window class name (200 ASCII characters) | `list_windows`, read the `className` field | The class name matches the value printed at startup |
+| Named mutex `X64DBG_MCP_ENVTARGET_MUTEX` | `list_handles`, filter for mutex objects | A mutex named `X64DBG_MCP_ENVTARGET_MUTEX` is present; its handle value matches the one printed at startup |
+| Open file handle in the temp directory | `list_handles`, filter for file objects | A file handle whose path matches `File path:` printed at startup is present |
+| Named event `X64DBG_MCP_ENVTARGET_EVENT` | `list_handles`, filter for event objects | An event named `X64DBG_MCP_ENVTARGET_EVENT` is present; its handle value matches the one printed at startup |
+| Loopback TCP connection | `list_connections` | An established TCP connection with local and remote address `127.0.0.1` on the port printed at startup (`TCP loopback port:`) is present |
+| PID | Attaching the debugger to the process | The PID matches the value printed at startup |
+
+## Important
+
+The built `envtarget.exe` is deliberately not stored in the repository —
+it is built locally with the command above and is a working (disposable)
+artifact for manual testing. It does not exit on its own: close its window
+or kill the process when you are done testing.

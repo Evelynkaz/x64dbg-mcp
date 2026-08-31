@@ -561,6 +561,74 @@ TEST_CASE("mcp: ping returns a successful result, not -32601") {
     REQUIRE(msg.contains("result"));
 }
 
+// ---- Regression: non-ASCII window titles must not corrupt the response ----
+
+// TruncateForTable (debugger_tools.cpp) has internal linkage inside an
+// anonymous namespace, so it is not reachable from a unit test directly.
+// This test instead exercises the bug through the public tool interface it
+// broke: list_windows on a window whose title contains multi-byte UTF-8
+// (CJK) text. Before the fix, a byte-wise cut inside TruncateForTable could
+// split a character and produce invalid UTF-8, which nlohmann::json::dump()
+// then rejected with type_error.316 inside HandleToolsCall, and the
+// exception was swallowed by HandleMessage's outermost catch into a bare
+// "Internal error". The three paddings below shift a fixed 3-byte CJK
+// character across the fixed cut offset used by FormatWindowList (28 - 3 =
+// 25), covering all three byte-offsets a cut can land on within a
+// character.
+TEST_CASE("mcp: list_windows with a non-ASCII (CJK) title does not corrupt the response") {
+    for (int pad = 0; pad < 3; ++pad)
+    {
+        const std::string pipeName = MakeMcpTestPipeName();
+
+        // Build a genuinely valid, long, non-ASCII title: 20 repetitions of
+        // a real 3-byte CJK character (U+4E2D, "中"), preceded by `pad`
+        // ASCII bytes so the character boundaries shift relative to the
+        // fixed cut offset used by TruncateForTable.
+        std::string title(static_cast<std::size_t>(pad), 'A');
+        for (int i = 0; i < 20; ++i)
+            title += "\xE4\xB8\xAD";
+
+        PipeServer pipeServer;
+        REQUIRE(pipeServer.Start(pipeName, [&title](const std::string& request) -> std::string {
+            const json parsed = json::parse(request);
+            const std::string method = parsed.at("method").get<std::string>();
+
+            json result;
+            if (method == "process.windows")
+            {
+                result = { {"windows", json::array({
+                    { {"handle", 1}, {"wndProc", 2}, {"threadId", 3},
+                      {"title", title}, {"className", title} }
+                })}, {"truncated", false} };
+            }
+
+            return json{ {"id", parsed.at("id")}, {"ok", true}, {"result", result} }.dump();
+        }));
+
+        auto link = std::make_shared<PluginLink>(pipeName, 1000, 3000);
+        McpServer server(CreateDefaultRegistry(link));
+
+        const std::string request = R"({"jsonrpc":"2.0","id":40,"method":"tools/call",
+            "params":{"name":"list_windows","arguments":{}}})";
+        auto response = server.HandleMessage(request);
+        REQUIRE(response.has_value());
+
+        // Before the fix, HandleMessage's own .dump() would throw on the
+        // invalid UTF-8 and the whole response degraded to a bare -32603
+        // "Internal error"; here the call must succeed instead.
+        const json msg = Parse(*response);
+        CHECK_FALSE(msg.contains("error"));
+        REQUIRE(msg.contains("result"));
+        CHECK(msg["result"]["isError"] == false);
+
+        // Truncation is for the human-readable table only: the structured
+        // result keeps the title untouched.
+        CHECK(msg["result"]["structuredContent"]["windows"][0]["title"] == title);
+
+        pipeServer.Stop();
+    }
+}
+
 // ---- clientCapabilities must be an object ----
 
 TEST_CASE("mcp: clientCapabilities not an object -> error -32602") {

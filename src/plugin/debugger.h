@@ -475,4 +475,70 @@ bool DisableCoverage(unsigned long long address, std::string& error);
 bool ReadCoverage(unsigned long long start, unsigned long long size,
                   std::vector<CoverageEntry>& out, bool& truncated, std::string& error);
 
+// Upper limit on the number of entries returned by a single ListHandles,
+// ListWindows, or ListConnections call: an open handle table or window list
+// can run into the thousands, and a full dump would flood the model's context.
+constexpr size_t kMaxProcessEnvEntries = 4096;
+
+// A single open kernel object handle of the debuggee.
+struct HandleEntry
+{
+    unsigned long long handle = 0;
+    unsigned int typeNumber = 0;
+    unsigned int grantedAccess = 0;
+    std::string typeName;   // e.g. File, Mutant, Event — from GetHandleName
+    std::string name;       // object name, may be empty
+};
+
+// Lists the debuggee's open handles. Requires active debugging; does not
+// require a pause. Empty results are normal, not an error. Capped at
+// kMaxProcessEnvEntries; truncated is set when the cap is reached.
+// namesIncomplete is set when a wall-clock deadline cut per-handle name
+// resolution short (see the comment on the deadline in debugger.cpp): the
+// entries already collected are still returned in full, with an empty
+// name/typeName for whichever ones were skipped — this is a partial
+// success, not an error.
+bool ListHandles(std::vector<HandleEntry>& out, bool& truncated, bool& namesIncomplete, std::string& error);
+
+// A single top-level or child window owned by the debuggee.
+struct WindowEntry
+{
+    unsigned long long handle = 0, parent = 0, wndProc = 0;
+    unsigned int threadId = 0, style = 0, styleEx = 0;
+    bool enabled = false;
+    int left = 0, top = 0, right = 0, bottom = 0;
+    std::string title, className;
+};
+
+// Lists the debuggee's windows. Requires active debugging; does not require
+// a pause. Empty results are normal, not an error. Capped at
+// kMaxProcessEnvEntries; truncated is set when the cap is reached.
+bool ListWindows(std::vector<WindowEntry>& out, bool& truncated, std::string& error);
+
+// A single TCP connection owned by the debuggee.
+struct ConnectionEntry
+{
+    std::string remoteAddress, localAddress, state;
+    unsigned int remotePort = 0, localPort = 0;
+};
+
+// Lists the debuggee's TCP connections. Requires active debugging; does not
+// require a pause. Empty results are normal, not an error. Capped at
+// kMaxProcessEnvEntries; truncated is set when the cap is reached.
+bool ListConnections(std::vector<ConnectionEntry>& out, bool& truncated, std::string& error);
+
+// A single record of the current thread's SEH exception handler chain.
+struct SehEntry { unsigned long long address = 0, handler = 0; };
+
+// The SEH chain of the current thread. Requires active debugging AND a
+// pause: the chain is read from the current thread's stack, which is only
+// meaningful while the process is not running, for the same reason
+// registers and the call stack require a pause.
+// On 64-bit builds, x64dbg's own ExHandlerGetSEH (external/x64dbg/src/dbg/exhandlerinfo.cpp)
+// is a stub that unconditionally `return false;`s under `#ifdef _WIN64` —
+// it does not walk a stack-based SEH chain there at all. So on x64, this
+// always returns an empty chain, regardless of what the target actually
+// has installed; that emptiness is NOT evidence about the debuggee.
+bool GetSehChain(std::vector<SehEntry>& out, std::string& error);
+
 } // namespace x64dbg_mcp::plugin

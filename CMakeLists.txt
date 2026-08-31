@@ -108,6 +108,13 @@ if(X64DBG_MCP_BUILD_TARGET)
     set_target_properties(crackme PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION OFF
     )
+
+    add_executable(envtarget tests/target/envtarget.c)
+    target_compile_options(envtarget PRIVATE /Od)
+    target_link_libraries(envtarget PRIVATE Ws2_32)
+    set_target_properties(envtarget PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION OFF
+    )
 endif()
 
 # Unit tests. Do not require a running x64dbg and are not linked against its SDK.

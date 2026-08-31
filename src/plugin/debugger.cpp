@@ -8,6 +8,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <mutex>
@@ -2797,6 +2798,258 @@ bool ReadCoverage(unsigned long long start, unsigned long long size,
         out.clear();
         truncated = false;
         error = "Internal error while reading coverage";
+        return false;
+    }
+}
+
+// Names GetHandleName (external/x64dbg/src/dbg/handles.cpp, HandlesGetName)
+// uses to report its own per-handle timeout, rather than leaving the name
+// empty. Presenting one of these as if it were a real object name would
+// mislead the model into thinking the object is actually named "WAIT_TIMEOUT".
+bool IsUnresolvedHandleNamePlaceholder(const std::string& name)
+{
+    return name == "WAIT_TIMEOUT" || name == "WAIT_FAILED" || name == "WAIT_ABANDONED";
+}
+
+bool ListHandles(std::vector<HandleEntry>& out, bool& truncated, bool& namesIncomplete, std::string& error)
+{
+    out.clear();
+    truncated = false;
+    namesIncomplete = false;
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->EnumHandles || !functions->GetHandleName)
+        {
+            error = "Handle listing is not supported by this x64dbg build";
+            return false;
+        }
+
+        BridgeList<HANDLEINFO> handles;
+        if (!functions->EnumHandles(&handles))
+        {
+            error = "Failed to retrieve the handle list";
+            return false;
+        }
+
+        const int count = handles.Count();
+        const int limit = count > static_cast<int>(kMaxProcessEnvEntries) ? static_cast<int>(kMaxProcessEnvEntries) : count;
+        truncated = count > static_cast<int>(kMaxProcessEnvEntries);
+        out.reserve(static_cast<size_t>(limit));
+
+        // GetHandleName (external/x64dbg/src/dbg/handles.cpp, HandlesGetName)
+        // spawns a separate thread per handle and waits up to 200 ms for it,
+        // TerminateThread-ing it on timeout. With up to kMaxProcessEnvEntries
+        // handles, a process with many blocking-on-name-query handles could
+        // otherwise stall this whole call for many minutes — and since the
+        // single worker thread serializes every debugger call, that stalls
+        // pause and everything else too. Worse, TerminateThread on a thread
+        // holding the heap lock can deadlock x64dbg permanently. Bound the
+        // total name-resolution work with a wall-clock deadline instead;
+        // entries past it are kept with an empty name/typeName rather than
+        // risk piling up more of these terminated threads.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+
+        for (int i = 0; i < limit; ++i)
+        {
+            const HANDLEINFO& info = handles[i];
+            HandleEntry entry;
+            entry.handle = static_cast<unsigned long long>(info.Handle);
+            entry.typeNumber = static_cast<unsigned int>(info.TypeNumber);
+            entry.grantedAccess = info.GrantedAccess;
+
+            if (std::chrono::steady_clock::now() < deadline)
+            {
+                // GetHandleName failing to resolve a name is normal (e.g. an
+                // unnamed object), so the entry is kept with empty
+                // name/typeName rather than dropped or treated as an error.
+                char name[512] = {};
+                char typeName[512] = {};
+                if (functions->GetHandleName(static_cast<duint>(info.Handle), name, sizeof(name), typeName, sizeof(typeName)))
+                {
+                    // On its own 200 ms timeout, GetHandleName reports an error
+                    // string such as "WAIT_TIMEOUT" as the name instead of
+                    // leaving it empty — that is not a real object name.
+                    if (!IsUnresolvedHandleNamePlaceholder(name))
+                        entry.name = name;
+                    entry.typeName = typeName;
+                }
+            }
+            else
+            {
+                namesIncomplete = true;
+            }
+            out.push_back(std::move(entry));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        truncated = false;
+        namesIncomplete = false;
+        error = "Internal error while listing handles";
+        return false;
+    }
+}
+
+bool ListWindows(std::vector<WindowEntry>& out, bool& truncated, std::string& error)
+{
+    out.clear();
+    truncated = false;
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->EnumWindows)
+        {
+            error = "Window listing is not supported by this x64dbg build";
+            return false;
+        }
+
+        BridgeList<WINDOW_INFO> windows;
+        if (!functions->EnumWindows(&windows))
+        {
+            error = "Failed to retrieve the window list";
+            return false;
+        }
+
+        const int count = windows.Count();
+        const int limit = count > static_cast<int>(kMaxProcessEnvEntries) ? static_cast<int>(kMaxProcessEnvEntries) : count;
+        truncated = count > static_cast<int>(kMaxProcessEnvEntries);
+        out.reserve(static_cast<size_t>(limit));
+        for (int i = 0; i < limit; ++i)
+        {
+            const WINDOW_INFO& info = windows[i];
+            WindowEntry entry;
+            entry.handle = static_cast<unsigned long long>(info.handle);
+            entry.parent = static_cast<unsigned long long>(info.parent);
+            entry.wndProc = static_cast<unsigned long long>(info.wndProc);
+            entry.threadId = static_cast<unsigned int>(info.threadId);
+            entry.style = static_cast<unsigned int>(info.style);
+            entry.styleEx = static_cast<unsigned int>(info.styleEx);
+            entry.enabled = info.enabled;
+            entry.left = info.position.left;
+            entry.top = info.position.top;
+            entry.right = info.position.right;
+            entry.bottom = info.position.bottom;
+            // windowTitle/windowClass are filled by the debugger with a plain
+            // memcpy up to sizeof(buffer) (see external/x64dbg/src/dbg/handles.cpp),
+            // with no guarantee of a trailing null terminator when the source is
+            // long enough to fill the buffer exactly. Constructing a std::string
+            // directly from the array would then read past its end. Bound the
+            // length explicitly instead.
+            entry.title.assign(info.windowTitle, ::strnlen(info.windowTitle, sizeof(info.windowTitle)));
+            entry.className.assign(info.windowClass, ::strnlen(info.windowClass, sizeof(info.windowClass)));
+            out.push_back(std::move(entry));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        truncated = false;
+        error = "Internal error while listing windows";
+        return false;
+    }
+}
+
+bool ListConnections(std::vector<ConnectionEntry>& out, bool& truncated, std::string& error)
+{
+    out.clear();
+    truncated = false;
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->EnumTcpConnections)
+        {
+            error = "Network connection listing is not supported by this x64dbg build";
+            return false;
+        }
+
+        BridgeList<TCPCONNECTIONINFO> connections;
+        if (!functions->EnumTcpConnections(&connections))
+        {
+            error = "Failed to retrieve the network connection list";
+            return false;
+        }
+
+        const int count = connections.Count();
+        const int limit = count > static_cast<int>(kMaxProcessEnvEntries) ? static_cast<int>(kMaxProcessEnvEntries) : count;
+        truncated = count > static_cast<int>(kMaxProcessEnvEntries);
+        out.reserve(static_cast<size_t>(limit));
+        for (int i = 0; i < limit; ++i)
+        {
+            const TCPCONNECTIONINFO& info = connections[i];
+            ConnectionEntry entry;
+            entry.remoteAddress = info.RemoteAddress;
+            entry.remotePort = info.RemotePort;
+            entry.localAddress = info.LocalAddress;
+            entry.localPort = info.LocalPort;
+            entry.state = info.StateText;
+            out.push_back(std::move(entry));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        truncated = false;
+        error = "Internal error while listing network connections";
+        return false;
+    }
+}
+
+bool GetSehChain(std::vector<SehEntry>& out, std::string& error)
+{
+    out.clear();
+    try
+    {
+        if (!RequirePaused("reading the SEH chain", error))
+            return false;
+
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->GetSEHChain)
+        {
+            error = "SEH chain retrieval is not supported by this x64dbg build";
+            return false;
+        }
+
+        DBGSEHCHAIN sehChain = {};
+        functions->GetSEHChain(&sehChain);
+
+        // GetSEHChain allocates sehChain.records via BridgeAlloc when total
+        // is greater than zero (see external/x64dbg/src/dbg/_dbgfunctions.cpp);
+        // the reference consumer, external/x64dbg/src/gui/Src/Gui/SEHChainView.cpp,
+        // frees the result through BridgeFree, so we do the same.
+        struct ChainGuard
+        {
+            DBGSEHCHAIN* chain;
+            ~ChainGuard() { if (chain->records) BridgeFree(chain->records); }
+        } guard{&sehChain};
+
+        out.reserve(static_cast<size_t>(sehChain.total));
+        for (duint i = 0; i < sehChain.total; ++i)
+        {
+            SehEntry entry;
+            entry.address = static_cast<unsigned long long>(sehChain.records[i].addr);
+            entry.handler = static_cast<unsigned long long>(sehChain.records[i].handler);
+            out.push_back(entry);
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        error = "Internal error while reading the SEH chain";
         return false;
     }
 }

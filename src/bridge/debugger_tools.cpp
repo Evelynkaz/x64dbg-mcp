@@ -1058,6 +1058,194 @@ std::string FormatAnnotationsSet(std::uint64_t address, bool hasLabel, const std
     return out.str();
 }
 
+// Truncates a string to at most maxLen bytes for display in a fixed-width
+// table column, appending '...' if it was cut; the structured result keeps
+// the string in full regardless of what the table shows.
+//
+// maxLen is a byte budget (it drives the width of fixed-width table
+// columns), but a plain byte-wise cut can land in the middle of a
+// multi-byte UTF-8 character — e.g. a CJK character is 3 bytes, so cutting
+// at an arbitrary offset splits it and produces invalid UTF-8. That invalid
+// text then reaches nlohmann::json::dump() in mcp_server.cpp, which throws
+// on invalid UTF-8 by default; the throw used to be swallowed by the
+// outermost catch and turned list_windows on a window with a non-ASCII
+// title into a bare "Internal error" for the whole call. So after picking
+// the byte budget, back up over trailing UTF-8 continuation bytes
+// (10xxxxxx) to land the cut on a character boundary.
+std::string TruncateForTable(const std::string& text, std::size_t maxLen)
+{
+    if (text.size() <= maxLen)
+        return text;
+
+    auto backUpToCharBoundary = [&text](std::size_t pos) {
+        while (pos > 0 && (static_cast<unsigned char>(text[pos]) & 0xC0) == 0x80)
+            --pos;
+        return pos;
+    };
+
+    if (maxLen <= 3)
+        return text.substr(0, backUpToCharBoundary(maxLen));
+    return text.substr(0, backUpToCharBoundary(maxLen - 3)) + "...";
+}
+
+// Aligned table of open handles: handle value, type, name. Followed by a
+// count line and, if the plugin reported truncation, a line about it. An
+// empty name is normal — many kernel objects (anonymous events, unnamed
+// sections and mutexes) simply have no name, and this is not a failure to
+// resolve it.
+std::string FormatHandleList(const nlohmann::json& handles, bool truncated)
+{
+    std::ostringstream out;
+    out << std::left
+        << std::setw(18) << "Handle"
+        << std::setw(16) << "Type"
+        << "Name" << '\n';
+
+    for (const auto& handle : handles)
+    {
+        const std::uint64_t value = handle.value("handle", 0ULL);
+        const std::string typeName = handle.value("typeName", std::string());
+        const std::string name = handle.value("name", std::string());
+
+        std::ostringstream handleText;
+        handleText << "0x" << std::hex << value;
+
+        out << std::left
+            << std::setw(18) << handleText.str()
+            << std::setw(16) << (typeName.empty() ? "(unknown)" : typeName)
+            << (name.empty() ? "(unnamed)" : name) << '\n';
+    }
+    out << handles.size() << " handle" << (handles.size() == 1 ? "" : "s") << ".\n";
+    if (truncated)
+        out << "Handle list truncated at the tool's limit.\n";
+    return out.str();
+}
+
+// Aligned table of windows: handle, title, class, window procedure address,
+// owning thread. Title and class are truncated to a sensible width for the
+// table only; the structured result keeps them in full. Followed by a
+// count line and, if the plugin reported truncation, a line about it.
+std::string FormatWindowList(const nlohmann::json& windows, bool truncated)
+{
+    std::ostringstream out;
+    out << std::left
+        << std::setw(18) << "Handle"
+        << std::setw(30) << "Title"
+        << std::setw(20) << "Class"
+        << std::setw(18) << "WndProc"
+        << "Thread" << '\n';
+
+    for (const auto& window : windows)
+    {
+        const std::uint64_t handle = window.value("handle", 0ULL);
+        const std::uint64_t wndProc = window.value("wndProc", 0ULL);
+        const unsigned int threadId = window.value("threadId", 0u);
+        const std::string title = window.value("title", std::string());
+        const std::string className = window.value("className", std::string());
+
+        std::ostringstream handleText, wndProcText;
+        handleText << "0x" << std::hex << handle;
+        wndProcText << "0x" << std::hex << wndProc;
+
+        out << std::left
+            << std::setw(18) << handleText.str()
+            << std::setw(30) << TruncateForTable(title, 28)
+            << std::setw(20) << TruncateForTable(className, 18)
+            << std::setw(18) << wndProcText.str()
+            << threadId << '\n';
+    }
+    out << windows.size() << " window" << (windows.size() == 1 ? "" : "s") << ".\n";
+    if (truncated)
+        out << "Window list truncated at the tool's limit.\n";
+    return out.str();
+}
+
+// Aligned table of TCP connections: local address:port, remote
+// address:port, state. Followed by a count line and, if the plugin
+// reported truncation, a line about it.
+std::string FormatConnectionList(const nlohmann::json& connections, bool truncated)
+{
+    std::ostringstream out;
+    out << std::left
+        << std::setw(24) << "Local"
+        << std::setw(24) << "Remote"
+        << "State" << '\n';
+
+    for (const auto& connection : connections)
+    {
+        const std::string localAddress = connection.value("localAddress", std::string());
+        const unsigned int localPort = connection.value("localPort", 0u);
+        const std::string remoteAddress = connection.value("remoteAddress", std::string());
+        const unsigned int remotePort = connection.value("remotePort", 0u);
+        const std::string state = connection.value("state", std::string());
+
+        std::ostringstream localText, remoteText;
+        localText << localAddress << ":" << localPort;
+        remoteText << remoteAddress << ":" << remotePort;
+
+        out << std::left
+            << std::setw(24) << localText.str()
+            << std::setw(24) << remoteText.str()
+            << state << '\n';
+    }
+    out << connections.size() << " connection" << (connections.size() == 1 ? "" : "s") << ".\n";
+    if (truncated)
+        out << "Connection list truncated at the tool's limit.\n";
+    return out.str();
+}
+
+// Table of SEH chain entries for the current thread: index, exception
+// registration record address, handler address. If the chain is empty,
+// says so and notes that 64-bit Windows uses table-based exception
+// handling instead of the classic FS:[0] linked list this walks, so an
+// empty chain there is expected rather than a sign the process has no
+// exception handlers — and, on top of that, x64dbg's own 64-bit build
+// does not even implement a stack-walked chain (ExHandlerGetSEH in
+// external/x64dbg/src/dbg/exhandlerinfo.cpp is `return false;` under
+// `#ifdef _WIN64`), so this tool always returns empty on x64 regardless
+// of the target.
+std::string FormatSehChain(const nlohmann::json& entries)
+{
+    std::ostringstream out;
+    if (entries.empty())
+    {
+        out << "No SEH chain entries on the current thread. 64-bit Windows "
+               "uses table-based exception handling instead of the classic "
+               "FS:[0] linked list, so an empty chain there is expected and "
+               "does not mean the process has no exception handlers; this "
+               "result is mainly meaningful for 32-bit targets. On top of "
+               "that, x64dbg's own 64-bit build does not implement a "
+               "stack-walked SEH chain at all, so this tool ALWAYS returns "
+               "empty on a 64-bit x64dbg, regardless of what the target "
+               "actually has installed — do not read this emptiness as "
+               "evidence about the program.\n";
+        return out.str();
+    }
+
+    out << std::left
+        << std::setw(6) << "Index"
+        << std::setw(18) << "Record"
+        << "Handler" << '\n';
+
+    std::size_t index = 0;
+    for (const auto& entry : entries)
+    {
+        const std::uint64_t address = entry.value("address", 0ULL);
+        const std::uint64_t handler = entry.value("handler", 0ULL);
+
+        std::ostringstream addressText, handlerText;
+        addressText << "0x" << std::hex << address;
+        handlerText << "0x" << std::hex << handler;
+
+        out << std::left
+            << std::setw(6) << index
+            << std::setw(18) << addressText.str()
+            << handlerText.str() << '\n';
+        ++index;
+    }
+    return out.str();
+}
+
 } // namespace
 
 void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> link)
@@ -3503,6 +3691,152 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(annotate));
+
+    Tool listHandles;
+    listHandles.name = "list_handles";
+    listHandles.description =
+        "List the kernel objects the debugged process currently has open: "
+        "files, registry keys, mutexes, events, semaphores, and other "
+        "processes, each with its handle value, type, and, where the "
+        "debugger can resolve it, its name. Use it to see which files a "
+        "program touched, to spot a single-instance mutex that gates a "
+        "second launch, or to notice that it opened another process — a "
+        "sign of injection or interprocess control. An empty name is "
+        "normal, NOT an error: many kernel objects (anonymous events, "
+        "unnamed sections and mutexes) simply have no name, and the "
+        "debugger could not have resolved one that does not exist. "
+        "Requires an active debugging session. The list is capped at the "
+        "plugin's limit; when the cap is hit, 'truncated' is true and the "
+        "human-readable text says so. Takes no parameters.";
+    listHandles.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", nlohmann::json::object()},
+        {"additionalProperties", false}
+    };
+    listHandles.handler = [link](const nlohmann::json& /*arguments*/) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("list_handles: plugin link is not configured");
+
+        ToolResult result;
+        result.structuredContent = link->Call("process.handles", nlohmann::json::object());
+        const nlohmann::json handles = result.structuredContent.value("handles", nlohmann::json::array());
+        result.text = FormatHandleList(handles, result.structuredContent.value("truncated", false));
+        return result;
+    };
+    registry.Add(std::move(listHandles));
+
+    Tool listWindows;
+    listWindows.name = "list_windows";
+    listWindows.description =
+        "List the windows belonging to the debugged process, each with its "
+        "handle, title, class name, owning thread identifier, window "
+        "procedure address, style flags, and position on screen. Use it to "
+        "connect a visible dialog or control to the code behind it: the "
+        "window procedure address is the entry point for that window's "
+        "message handling, and is exactly where a breakpoint goes when "
+        "investigating what happens when a button is clicked or a message "
+        "is received. A console application or a background service "
+        "legitimately has no windows at all; an empty result is normal, "
+        "not an error. Requires an active debugging session. The list is "
+        "capped at the plugin's limit; when the cap is hit, 'truncated' is "
+        "true and the human-readable text says so. Takes no parameters.";
+    listWindows.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", nlohmann::json::object()},
+        {"additionalProperties", false}
+    };
+    listWindows.handler = [link](const nlohmann::json& /*arguments*/) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("list_windows: plugin link is not configured");
+
+        ToolResult result;
+        result.structuredContent = link->Call("process.windows", nlohmann::json::object());
+        const nlohmann::json windows = result.structuredContent.value("windows", nlohmann::json::array());
+        result.text = FormatWindowList(windows, result.structuredContent.value("truncated", false));
+        return result;
+    };
+    registry.Add(std::move(listWindows));
+
+    Tool listConnections;
+    listConnections.name = "list_connections";
+    listConnections.description =
+        "List the debugged process's active TCP connections, each with the "
+        "local address and port, the remote address and port, and the "
+        "connection state. Use it to find out where a program connects "
+        "over the network; combined with a breakpoint on a networking API "
+        "(for example connect or send), this identifies the exact code "
+        "responsible for a given connection. Reports TCP connections only, "
+        "not UDP. A program that does not use the network legitimately has "
+        "none; an empty result is normal, not an error. Requires an "
+        "active debugging session. The list is capped at the plugin's "
+        "limit; when the cap is hit, 'truncated' is true and the "
+        "human-readable text says so. Takes no parameters.";
+    listConnections.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", nlohmann::json::object()},
+        {"additionalProperties", false}
+    };
+    listConnections.handler = [link](const nlohmann::json& /*arguments*/) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("list_connections: plugin link is not configured");
+
+        ToolResult result;
+        result.structuredContent = link->Call("process.connections", nlohmann::json::object());
+        const nlohmann::json connections = result.structuredContent.value("connections", nlohmann::json::array());
+        result.text = FormatConnectionList(connections, result.structuredContent.value("truncated", false));
+        return result;
+    };
+    registry.Add(std::move(listConnections));
+
+    Tool sehChain;
+    sehChain.name = "seh_chain";
+    sehChain.description =
+        "Show the chain of structured exception handlers (SEH) registered "
+        "for the current thread, each with the exception registration "
+        "record's address on the stack and the address of its handler "
+        "function. Exception-based control flow and anti-debugging both "
+        "lean on handlers: code that installs a handler and then "
+        "deliberately triggers a fault hides its real logic inside that "
+        "handler, invisible to a straightforward disassembly of the "
+        "surrounding code. This tool shows where that handler lives so it "
+        "can be disassembled or broken on directly. Requires the process "
+        "to be paused, since the chain is read off the current thread's "
+        "stack; it reflects the current thread only, not every thread in "
+        "the process. 64-bit Windows uses table-based exception handling "
+        "instead of the classic FS:[0] linked list this tool walks, so "
+        "this result is mainly meaningful for 32-bit (x86) targets — an "
+        "empty chain on a 64-bit target does not mean the process has no "
+        "exception handlers, and the human-readable text says so "
+        "explicitly rather than leaving the model to draw that conclusion "
+        "from an empty list. On top of that, x64dbg itself does not "
+        "implement a stack-walked SEH chain in its 64-bit build at all, so "
+        "on x64 this tool ALWAYS returns an empty chain regardless of the "
+        "target — an empty result there is not evidence of anything. Takes "
+        "no parameters.";
+    sehChain.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", nlohmann::json::object()},
+        {"additionalProperties", false}
+    };
+    sehChain.handler = [link](const nlohmann::json& /*arguments*/) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("seh_chain: plugin link is not configured");
+
+        ToolResult result;
+        result.structuredContent = link->Call("process.seh_chain", nlohmann::json::object());
+        const nlohmann::json entries = result.structuredContent.value("entries", nlohmann::json::array());
+        result.text = FormatSehChain(entries);
+        return result;
+    };
+    registry.Add(std::move(sehChain));
 }
 
 } // namespace x64dbg_mcp::bridge
