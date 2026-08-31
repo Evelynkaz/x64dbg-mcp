@@ -9,6 +9,11 @@
 // designed to be called from an arbitrary thread (see
 // docs/notes/x64dbg-api.md), and serializing through the single worker
 // thread is the only guard against this class of races.
+//
+// EXCEPTION: StartLogCapture is a file and GUI-request operation, not a
+// debugger-state query, and is called directly from the GUI thread (see
+// McpService::EnableLogCapture) — see the comment there for why. Its shared
+// state is protected by a mutex in debugger.cpp precisely because of this.
 
 #include "nlohmann/json.hpp"
 
@@ -252,5 +257,57 @@ bool GetXrefs(unsigned long long address, std::vector<XrefEntry>& out, std::stri
 
 // Boundaries of the function containing an address. Requires active debugging.
 bool GetFunctionRange(unsigned long long address, unsigned long long& start, unsigned long long& end, std::string& error);
+
+// Upper limit on the number of lines returned by a single ReadLog call.
+constexpr size_t kMaxLogLines = 1000;
+
+// Result of running a command or a script.
+struct CommandResult
+{
+    bool accepted = false;    // the debugger accepted the command
+    std::string output;       // log text produced while the command ran
+    bool logCaptured = false; // whether log capture is active at all
+};
+
+// Runs an arbitrary x64dbg command.
+// When async is true the command is queued on the debugger's own command
+// thread and the call returns immediately; otherwise it runs synchronously
+// and its result is reported. Commands changing execution state (run,
+// StepInto, ...) should be queued with async == true; the caller can wait
+// for the resulting pause separately, e.g. via debug.wait.
+bool ExecuteCommand(const std::string& command, bool async, CommandResult& out, std::string& error);
+
+// Runs a script given as text. The text is written to a temporary file,
+// loaded and executed. Script execution is asynchronous: the result reports
+// that the script was started, along with whatever log output appeared
+// before this call returned, not the script's full output.
+bool RunScript(const std::string& scriptText, CommandResult& out, std::string& error);
+
+// Returns the last lines of captured log output, capped at kMaxLogLines.
+// truncated is set when more lines existed than were returned. Succeeds with
+// an empty out even when capture is not active — that is a normal situation,
+// not an error.
+bool ReadLog(size_t maxLines, std::vector<std::string>& out, bool& truncated, std::string& error);
+
+// Starts and stops log capture. Called from the service lifecycle. Starting
+// determines the snapshot file path and takes one snapshot to anchor the
+// starting point, so output produced before the server started is not
+// returned as if it were a command's output; see IsLogCaptureActive for how
+// readiness is decided afterwards. StartLogCapture is called directly on the
+// GUI thread, not through DebuggerWorker::Submit — see
+// McpService::EnableLogCapture.
+bool StartLogCapture(std::string& error);
+void StopLogCapture();
+
+// Whether log capture is active right now: a snapshot path is known and the
+// most recent snapshot attempt (from StartLogCapture, ExecuteCommand,
+// RunScript, or ReadLog) succeeded.
+bool IsLogCaptureActive();
+
+// Path to the log capture file, empty if StartLogCapture has not been
+// called. Exposed so callers can report where captured output is expected to
+// be written, which is what makes diagnosing a stuck capture possible from
+// outside.
+std::string LogCaptureFilePath();
 
 } // namespace x64dbg_mcp::plugin

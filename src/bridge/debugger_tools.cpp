@@ -686,10 +686,11 @@ std::string FormatXrefs(const nlohmann::json& result)
     if (xrefs.empty())
     {
         out << "No references found to 0x" << std::hex << address
-            << ". Cross-references come from analysis already performed by "
+            << ". Cross-references come from xref analysis already performed by "
                "the debugger, so an unanalyzed module may report none even "
-               "though references exist in the code; running analysis on "
-               "the module from x64dbg's own Analysis menu first may help.\n";
+               "though references exist in the code; running the 'analxrefs' "
+               "command with the execute_command tool first may help — note "
+               "that 'analyse' alone does not build cross-references.\n";
         return out.str();
     }
 
@@ -727,6 +728,42 @@ std::string FormatDisassembleFunction(const nlohmann::json& result)
         << FormatDisasmListing(instructions);
     if (result.value("truncated", false))
         out << "Instruction listing truncated at the tool's limit.\n";
+    return out.str();
+}
+
+// Human-readable summary of command.exec: whether the command was
+// accepted, a note if log capture is inactive, then its output verbatim.
+std::string FormatCommandResult(const nlohmann::json& result)
+{
+    std::ostringstream out;
+    out << (result.value("accepted", false) ? "Command accepted." : "Command rejected by the debugger.") << '\n';
+    if (!result.value("logCaptured", false))
+        out << "Log capture is inactive; the command still ran, but its output could not be captured.\n";
+    out << result.value("output", std::string());
+    return out.str();
+}
+
+// Human-readable summary of script.run: confirms the script started, then
+// whatever output the log held at that moment.
+std::string FormatScriptResult(const nlohmann::json& result)
+{
+    std::ostringstream out;
+    out << "Script started.\n" << result.value("output", std::string());
+    return out.str();
+}
+
+// The requested tail of the x64dbg log, followed by a line count and, if
+// the result was truncated at the requested limit, a note about it.
+std::string FormatLogLines(const nlohmann::json& result)
+{
+    const nlohmann::json lines = result.value("lines", nlohmann::json::array());
+
+    std::ostringstream out;
+    for (const auto& line : lines)
+        out << line.get<std::string>() << '\n';
+    out << lines.size() << " line" << (lines.size() == 1 ? "" : "s") << ".\n";
+    if (result.value("truncated", false))
+        out << "Log truncated; more lines exist beyond the requested limit.\n";
     return out.str();
 }
 
@@ -1958,13 +1995,13 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         "the kind of reference: a call, a jump, or a data access. Use it "
         "to find every caller of a function, to find code that reads a "
         "variable of interest, or to gauge how heavily a function is "
-        "used. Limitation: references come from analysis already "
+        "used. Limitation: references come from xref analysis already "
         "performed by the debugger, so unanalyzed regions may hold "
         "references that are not listed here; an empty result does not "
         "prove that no references exist. If a module has not been "
-        "analyzed yet, run analysis on it from x64dbg's own Analysis menu "
-        "first (a tool for running arbitrary debugger commands is planned "
-        "but not available yet). Parameters: 'address' — a "
+        "xref-analyzed yet, run it directly with the execute_command "
+        "tool using the 'analxrefs' command; note that 'analyse' alone "
+        "does not build cross-references. Parameters: 'address' — a "
         "non-negative integer giving the address to find references to (a "
         "number, not a hex string).";
     findReferences.inputSchema = {
@@ -2008,9 +2045,9 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         "in the same shape as disassemble. Limitations: the boundaries "
         "come from the debugger's analysis, so the tool fails if no "
         "function is defined at 'address'; if a module has not been "
-        "analyzed yet, run analysis on it from x64dbg's own Analysis menu "
-        "first (a tool for running arbitrary debugger commands is planned "
-        "but not available yet); very long functions are cut "
+        "analyzed yet, run analysis directly with the execute_command "
+        "tool using the 'analyse' command, which builds function "
+        "boundaries for the current module; very long functions are cut "
         "off at the tool's instruction limit, which is reported by a "
         "truncation flag in the result. Parameters: 'address' — a "
         "non-negative integer giving an address inside the function to "
@@ -2044,6 +2081,178 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(disassembleFunction));
+
+    Tool executeCommand;
+    executeCommand.name = "execute_command";
+    executeCommand.description =
+        "Run any x64dbg command and return whatever the debugger printed "
+        "to its log as a result. This is the escape hatch: x64dbg has "
+        "over three hundred commands, and anything not covered by a "
+        "dedicated tool in this server is reachable here. Examples: "
+        "'analyse' builds function boundaries for the current module, "
+        "which disassemble_function depends on; 'analxrefs' builds "
+        "cross-references for the current module, which find_references "
+        "depends on — 'analyse' alone does not build cross-references; "
+        "'bpgoto' and "
+        "other breakpoint commands not exposed by set_breakpoint; "
+        "'memset' and other memory commands; 'var' to declare or inspect "
+        "a debugger variable. IMPORTANT: the arguments of an x64dbg "
+        "command are separated by COMMAS, not spaces, e.g. "
+        "'bp kernel32.CreateFileW,\"my label\"' — passing space-separated "
+        "arguments is a very common mistake and usually makes the "
+        "command fail silently or do something unintended. By default "
+        "the command runs synchronously and its result is reported "
+        "directly in this call. Set 'async' to true for a command that "
+        "resumes execution (e.g. 'run', or a breakpoint command expected "
+        "to hit); after an asynchronous call, use wait_until_paused to "
+        "wait for the next pause. Whether output was actually captured "
+        "depends on the debugger's log capture being active; the "
+        "result's 'logCaptured' field says whether it was. A command the "
+        "debugger rejects returns 'accepted' as false, together with "
+        "whatever it printed. SAFETY: this tool can change the state of "
+        "the debuggee and of the debugger itself, including writing "
+        "memory and resuming execution — use it deliberately, not "
+        "experimentally.";
+    executeCommand.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"command", {
+                {"type", "string"},
+                {"description",
+                 "x64dbg command to run, e.g. 'analyse', 'analxrefs', 'bpgoto 0x401000', "
+                 "'memset 0x401000,0x90,0x10', or 'var x = 1'. Arguments are "
+                 "separated by commas, not spaces."}
+            }},
+            {"async", {
+                {"type", "boolean"},
+                {"default", false},
+                {"description",
+                 "If true, the command runs asynchronously: use this for a command "
+                 "that resumes execution, then call wait_until_paused to wait for "
+                 "the next pause. Defaults to false (synchronous)."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"command"})},
+        {"additionalProperties", false}
+    };
+    executeCommand.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("execute_command: plugin link is not configured");
+
+        if (!arguments.contains("command") || !arguments["command"].is_string())
+            throw ToolError("execute_command: 'command' is required and must be a string");
+        const std::string command = arguments["command"].get<std::string>();
+        const bool async = arguments.value("async", false);
+
+        ToolResult result;
+        result.structuredContent = link->Call("command.exec", {
+            {"command", command},
+            {"async", async}
+        });
+        result.text = FormatCommandResult(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(executeCommand));
+
+    Tool runScript;
+    runScript.name = "run_script";
+    runScript.description =
+        "Run an x64dbg script given as text. Useful for sequences that "
+        "would otherwise take many round trips through execute_command — "
+        "setting up a group of breakpoints, walking a structure field by "
+        "field, or repeating an action. Execution is asynchronous: this "
+        "tool reports that the script started and returns whatever log "
+        "output was available at that moment, without waiting for the "
+        "script to finish; use wait_until_paused afterward to wait for "
+        "the script to reach a pause. Limitations: the script language is "
+        "x64dbg's own scripting language, not the same syntax as a single "
+        "command; a syntax error in the script surfaces in the log "
+        "output rather than as a tool error. Parameters: 'script' — the "
+        "full text of the script to run.";
+    runScript.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"script", {
+                {"type", "string"},
+                {"description", "Full text of the x64dbg script to run."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"script"})},
+        {"additionalProperties", false}
+    };
+    runScript.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("run_script: plugin link is not configured");
+
+        if (!arguments.contains("script") || !arguments["script"].is_string())
+            throw ToolError("run_script: 'script' is required and must be a string");
+        const std::string script = arguments["script"].get<std::string>();
+
+        ToolResult result;
+        result.structuredContent = link->Call("script.run", {
+            {"script", script}
+        });
+        result.text = FormatScriptResult(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(runScript));
+
+    Tool readLog;
+    readLog.name = "read_log";
+    readLog.description =
+        "Return the most recent lines of the x64dbg log, including output "
+        "from commands run with execute_command or run_script, "
+        "breakpoint hits, and messages printed by the debugger itself. "
+        "Use it after an asynchronous execute_command or run_script call "
+        "to see what happened, or to inspect the output recorded by a "
+        "logging breakpoint (set_breakpoint's 'log' parameter), which "
+        "writes data to the log without stopping the process. Returns at "
+        "most 1000 lines per call, the most recent ones. Limitations: "
+        "capture must be active for there to be anything to read; the "
+        "result's 'logCaptured' field says whether it is. Parameters: "
+        "'max_lines' — maximum number of lines to return, from 1 to "
+        "1000, defaulting to 200.";
+    readLog.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"max_lines", {
+                {"type", "integer"},
+                {"minimum", 1},
+                {"maximum", 1000},
+                {"default", 200},
+                {"description", "Maximum number of most recent log lines to return, from 1 to 1000."}
+            }}
+        }},
+        {"additionalProperties", false}
+    };
+    readLog.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("read_log: plugin link is not configured");
+
+        long long maxLines = 200;
+        if (arguments.contains("max_lines"))
+        {
+            if (!arguments["max_lines"].is_number_integer())
+                throw ToolError("read_log: 'max_lines' must be an integer between 1 and 1000");
+            maxLines = arguments["max_lines"].get<long long>();
+            if (maxLines < 1 || maxLines > 1000)
+                throw ToolError("read_log: 'max_lines' must be between 1 and 1000");
+        }
+
+        ToolResult result;
+        result.structuredContent = link->Call("log.read", {
+            {"max_lines", maxLines}
+        });
+        result.text = FormatLogLines(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(readLog));
 }
 
 } // namespace x64dbg_mcp::bridge

@@ -24,6 +24,14 @@ public:
     // Stops everything in a safe order (see the .cpp).
     void Stop();
 
+    // Enables log capture, logging the outcome to the x64dbg log. Must be
+    // called once the GUI is up (see the call site in plugin.cpp) — a
+    // snapshot request issued before then is otherwise silently dropped.
+    // Must be called ON THE GUI THREAD: it issues GUI-side requests
+    // directly, without going through DebuggerWorker::Submit (see the .cpp
+    // for why).
+    void EnableLogCapture();
+
     DebugStateTracker& Tracker();
 
     // The name of the pipe the server is listening on (for logging).

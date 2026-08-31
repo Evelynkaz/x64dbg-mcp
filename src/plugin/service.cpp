@@ -4,6 +4,7 @@
 #include "common/ipc_protocol.h"
 #include "nlohmann/json.hpp"
 
+#include <cstdio>
 #include <memory>
 
 // GetCurrentProcessId is used for the fallback pipe name; windows.h is
@@ -1112,6 +1113,116 @@ std::string HandleFunctionDisasm(DebuggerWorker& worker, const nlohmann::json& i
     return BuildOkResponse(id, result);
 }
 
+nlohmann::json CommandResultToJson(const CommandResult& result)
+{
+    nlohmann::json out;
+    out["accepted"] = result.accepted;
+    out["output"] = result.output;
+    out["logCaptured"] = result.logCaptured;
+    return out;
+}
+
+struct CommandResultOutcome
+{
+    bool ok = false;
+    CommandResult result;
+    std::string error;
+};
+
+std::string HandleCommandExec(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string command;
+    std::string paramError;
+    if (!GetRequiredStringParam(params, "command", command, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    bool async = false;
+    if (!GetOptionalBoolParam(params, "async", false, async, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<CommandResultOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, command, async] { outcome->ok = ExecuteCommand(command, async, outcome->result, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    return BuildOkResponse(id, CommandResultToJson(outcome->result));
+}
+
+std::string HandleScriptRun(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string script;
+    std::string paramError;
+    if (!GetRequiredStringParam(params, "script", script, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<CommandResultOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, script] { outcome->ok = RunScript(script, outcome->result, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    return BuildOkResponse(id, CommandResultToJson(outcome->result));
+}
+
+struct LogReadOutcome
+{
+    bool ok = false;
+    std::vector<std::string> lines;
+    bool truncated = false;
+    bool captured = false;
+    std::string captureFile;
+    std::string error;
+};
+
+std::string HandleLogRead(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string paramError;
+    int maxLines = 200;
+    if (!GetOptionalIntParam(params, "max_lines", 200, maxLines, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+    if (maxLines < 1)
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, "Parameter \"max_lines\" must be greater than zero");
+
+    auto outcome = std::make_shared<LogReadOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, maxLines]
+        {
+            outcome->ok = ReadLog(static_cast<size_t>(maxLines), outcome->lines, outcome->truncated, outcome->error);
+            outcome->captured = IsLogCaptureActive();
+            outcome->captureFile = LogCaptureFilePath();
+        },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["lines"] = outcome->lines;
+    result["truncated"] = outcome->truncated;
+    result["logCaptured"] = outcome->captured;
+    result["captureFile"] = outcome->captureFile;
+    if (!outcome->captured)
+        result["note"] = "Log capture is not active, so no output is available.";
+    return BuildOkResponse(id, result);
+}
+
 // Debug state callbacks. Run on x64dbg's own debugger threads, so they must
 // be as short as possible and never throw: DebugStateTracker itself never throws.
 void CbInitDebug(CBTYPE, void*) { McpService::Instance().Tracker().NotifyDebugStarted(); }
@@ -1159,8 +1270,42 @@ bool McpService::Start()
     }
 
     dputs("failed to start the IPC pipe server");
+    worker_.Submit([] { StopLogCapture(); }, kDefaultTimeoutMs);
     worker_.Stop();
     return false;
+}
+
+void McpService::EnableLogCapture()
+{
+    // This is best-effort: if it cannot be enabled, log a warning and keep
+    // going — the server, and command execution itself, remain fully usable
+    // without it, just without captured output.
+    //
+    // Unlike everything else in debugger.h, StartLogCapture must NOT be
+    // submitted to the worker thread. It issues GUI-side requests
+    // (GuiLogSave, GuiFlushLog) delivered to Qt slots that run on the GUI
+    // thread. This function is called from pluginSetup, which x64dbg runs ON
+    // the GUI thread and which blocks waiting for this call to return — so
+    // if those requests were issued from the worker thread instead, the GUI
+    // thread could never service its own queue to process them while it sits
+    // here waiting, and the requests would never run. (An earlier version of
+    // this code appeared to work only by accident: a 2-second poll inside
+    // the worker task delayed things long enough for the GUI queue to drain
+    // afterwards; removing that poll exposed this.) Calling StartLogCapture
+    // directly, here, on the GUI thread is correct precisely because it is a
+    // file and GUI-request operation, not a query into debugger state, so
+    // the usual "worker thread only" rule for debugger.h does not apply to it.
+    std::string captureError;
+    const bool started = StartLogCapture(captureError);
+
+    if (!started)
+    {
+        dprintf("failed to start log capture: %s; commands will still run but their output will not be captured\n",
+                captureError.c_str());
+        return;
+    }
+
+    dprintf("log capture started, snapshotting to \"%s\"\n", LogCaptureFilePath().c_str());
 }
 
 void McpService::Stop()
@@ -1172,12 +1317,16 @@ void McpService::Stop()
     // 2) PipeServer::Stop() — stops accepting new requests and wakes up the
     //    connection threads, so no new tasks are submitted to the worker
     //    queue anymore.
-    // 3) DebuggerWorker::Stop() — stops the executor last.
+    // 3) StopLogCapture(), submitted to the worker — must run while the
+    //    worker thread is still alive, since log capture state may only be
+    //    touched from that thread.
+    // 4) DebuggerWorker::Stop() — stops the executor last.
     // The reverse order would mean the worker's Stop() waits for the current
     // task, which may itself be waiting for a debugger pause — hanging until
     // its own timeout and delaying the plugin unload for that whole time.
     tracker_.Shutdown();
     pipeServer_.Stop();
+    worker_.Submit([] { StopLogCapture(); }, kDefaultTimeoutMs);
     worker_.Stop();
 }
 
@@ -1247,6 +1396,12 @@ std::string McpService::HandleRequest(const std::string& request)
         return HandleXrefsGet(worker_, id, params);
     if (method == "function.disasm")
         return HandleFunctionDisasm(worker_, id, params);
+    if (method == "command.exec")
+        return HandleCommandExec(worker_, id, params);
+    if (method == "script.run")
+        return HandleScriptRun(worker_, id, params);
+    if (method == "log.read")
+        return HandleLogRead(worker_, id, params);
 
     return BuildErrorResponse(id, ipc::ErrorCode::UnknownMethod, "Unknown method: " + method);
 }

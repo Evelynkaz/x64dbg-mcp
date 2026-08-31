@@ -30,6 +30,13 @@ bool pluginInit(PLUG_INITSTRUCT* initStruct)
 void pluginSetup()
 {
     dputs("plugin setup done");
+
+    // Log capture is enabled here rather than in pluginInit: pluginInit runs
+    // before the GUI is fully up, and a snapshot request is silently
+    // dropped if the GUI isn't ready to honour it yet. pluginSetup runs
+    // later, on the GUI thread, which is exactly when the request can
+    // actually take effect.
+    x64dbg_mcp::plugin::McpService::Instance().EnableLogCapture();
 }
 
 // Plugin unload. Does NOT run on the GUI thread — here we need to wait for

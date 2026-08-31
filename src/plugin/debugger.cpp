@@ -5,7 +5,10 @@
 #include "pluginsdk/_scriptapi_pattern.h"
 
 #include <chrono>
+#include <cstdio>
+#include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <thread>
 
@@ -279,6 +282,227 @@ std::string XrefTypeToString(XREFTYPE type)
     case XREF_CALL: return "call";
     default: return "none";
     }
+}
+
+// State of log capture. Unlike everything else in this file, this is NOT
+// accessed only from the DebuggerWorker worker thread: StartLogCapture runs
+// directly on the GUI thread (see McpService::EnableLogCapture), while
+// ReadLog and friends still run on the worker thread. g_logCaptureMutex
+// protects exactly these three fields against that race; it is not held
+// across file I/O.
+struct LogCaptureState
+{
+    std::wstring filePath;       // empty until StartLogCapture has been called
+    size_t deliveredBytes = 0;   // bytes of the log already delivered to a caller as a command's output
+    bool lastSnapshotOk = false; // outcome of the most recent SnapshotLog call
+};
+LogCaptureState g_logCapture;
+std::mutex g_logCaptureMutex;
+
+std::string WideToUtf8(const std::wstring& wide)
+{
+    if (wide.empty())
+        return {};
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+                                            nullptr, 0, nullptr, nullptr);
+    if (needed <= 0)
+        return {};
+    std::string utf8(static_cast<size_t>(needed), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), utf8.data(), needed, nullptr, nullptr);
+    return utf8;
+}
+
+// Waits for GuiLogSave's write to finish: the request is delivered to the
+// GUI thread asynchronously when issued, as here, from a non-GUI thread, so
+// the file may not exist, or may still be mid-write, the instant GuiLogSave
+// returns. Polls the file's size and last-write time; once two consecutive
+// polls see the same values, the write is done. Gives up after a small total
+// budget and reports whatever was last observed, so a stuck write does not
+// hang the caller forever.
+bool WaitForSnapshotFile(const std::wstring& path)
+{
+    constexpr int kBudgetMs = 1000;
+    constexpr int kStepMs = 25;
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kBudgetMs);
+    bool havePrevious = false;
+    WIN32_FILE_ATTRIBUTE_DATA previous = {};
+    for (;;)
+    {
+        WIN32_FILE_ATTRIBUTE_DATA current = {};
+        if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &current))
+        {
+            if (havePrevious &&
+                current.nFileSizeLow == previous.nFileSizeLow && current.nFileSizeHigh == previous.nFileSizeHigh &&
+                current.ftLastWriteTime.dwLowDateTime == previous.ftLastWriteTime.dwLowDateTime &&
+                current.ftLastWriteTime.dwHighDateTime == previous.ftLastWriteTime.dwHighDateTime)
+                return true; // unchanged since the last poll: the write is done
+            previous = current;
+            havePrevious = true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline)
+            return havePrevious;
+        std::this_thread::sleep_for(std::chrono::milliseconds(kStepMs));
+    }
+}
+
+// Whether line mentions the snapshot file's own path. Used to recognize
+// lines this mechanism added to the log itself, as opposed to lines the
+// caller's command produced.
+bool LineMentionsSnapshotPath(const std::string& line, const std::string& snapshotPathUtf8)
+{
+    return !snapshotPathUtf8.empty() && line.find(snapshotPathUtf8) != std::string::npos;
+}
+
+// Drops every line that mentions the snapshot file's path from text: taking
+// a snapshot adds such lines to the log itself (GuiLogSave's handler reports
+// "<message> as <path>" once it has written the file, see
+// LogView::saveToFileSlot in external/x64dbg/src/gui/Src/Gui/LogView.cpp),
+// and they must not be attributed to the caller's command. Matching on the
+// path rather than on any particular wording is what survives a localized
+// x64dbg build, where that message is translated but the path is not.
+std::string StripSnapshotNoise(const std::string& text, const std::string& snapshotPathUtf8)
+{
+    if (snapshotPathUtf8.empty())
+        return text;
+
+    std::istringstream stream(text);
+    std::ostringstream result;
+    std::string line;
+    bool wroteAny = false;
+    while (std::getline(stream, line))
+    {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (LineMentionsSnapshotPath(line, snapshotPathUtf8))
+            continue;
+        if (wroteAny)
+            result << '\n';
+        result << line;
+        wroteAny = true;
+    }
+    return result.str();
+}
+
+// Bounds on the settling retry loop in SnapshotLog: at most this many
+// GuiLogSave round trips, with this pause between them, before giving up on
+// waiting for the log to stop growing and returning whatever was last read.
+constexpr int kMaxSnapshotAttempts = 3;
+constexpr int kSnapshotSettleStepMs = 50;
+
+// Snapshots the whole log into contents, as UTF-8 text. Also records the
+// outcome into g_logCapture.lastSnapshotOk, which is how IsLogCaptureActive
+// decides whether capture is working.
+//
+// This snapshots the log rather than tailing a stream because the alternative
+// — redirecting the log to a file with GuiLogRedirect and reading its growth
+// — does not work when driven from outside the GUI: x64dbg opens the
+// redirect target with _wfopen_s(..., L"ab") and writes to it with fwrite,
+// but external/x64dbg/src/gui/Src/Gui/LogView.cpp contains no fflush for
+// that handle anywhere, and flushLogSlot only flushes the GUI's own display
+// buffer — so the data sits in the CRT's buffer and the file on disk stays
+// at zero bytes until the buffer fills or the file is closed. GuiLogSave,
+// used here instead, writes the whole log to a file and closes it in one
+// shot, so its output is actually on disk by the time the write completes.
+//
+// A single GuiLogSave round trip can still miss text that was logged just
+// before this call, even after GuiFlushLog(): GuiLogSave's handler
+// (LogView::saveToFileSlot) saves document()->toPlainText(), but newly
+// logged text first lands in an internal buffer (logBuffer) and is only
+// moved into the document by LogView's own flush timer — which runs only
+// while the Log view happens to be the currently-visible GUI widget (see
+// LogView::showEvent/hideEvent). GuiFlushLog() requests a flush but only
+// performs it immediately in that same case; otherwise the flush is
+// deferred until the buffer receives another message — which here is
+// GuiLogSave's own "log saved" notice, added right after the file is
+// written, one call too late for that same call to see it. To work around
+// this without guessing a fixed delay, retry and compare consecutive
+// attempts (after stripping this mechanism's own bookkeeping lines, which
+// would otherwise keep the comparison from ever settling, since GuiLogSave
+// adds one more such line on every attempt) until the real content stops
+// growing.
+bool SnapshotLog(std::string& contents, std::string& error)
+{
+    contents.clear();
+
+    std::wstring path;
+    {
+        std::lock_guard<std::mutex> lock(g_logCaptureMutex);
+        path = g_logCapture.filePath;
+    }
+    if (path.empty())
+    {
+        error = "Log capture has not been started";
+        return false;
+    }
+    const std::string pathUtf8 = WideToUtf8(path);
+
+    std::string previousFiltered;
+    bool havePrevious = false;
+    bool ok = false;
+    for (int attempt = 0; attempt < kMaxSnapshotAttempts; ++attempt)
+    {
+        std::string current;
+        bool attemptOk = false;
+        do
+        {
+            // Log messages are queued on the GUI side; without this, text
+            // produced just before this call could still be missing from the
+            // snapshot.
+            GuiFlushLog();
+
+            // The GUI's save handler (LogView::saveToFileSlot) opens its target
+            // with QIODevice::Append, so a stale copy from a previous snapshot
+            // would end up duplicated ahead of the fresh one — delete it first
+            // so every snapshot starts from a clean file.
+            DeleteFileW(path.c_str());
+
+            GuiLogSave(pathUtf8.c_str());
+
+            if (!WaitForSnapshotFile(path))
+            {
+                error = "Timed out waiting for the log snapshot to be written";
+                break;
+            }
+
+            // Unlike the redirect path, the save path does not consult
+            // Misc/Utf16LogRedirect: LogView::saveToFileSlot always writes
+            // document()->toPlainText().toUtf8() (see
+            // external/x64dbg/src/gui/Src/Gui/LogView.cpp), so the file is
+            // always UTF-8 and can be read directly, with no decoding step.
+            std::ifstream file(path, std::ios::binary);
+            if (!file)
+            {
+                error = "Failed to open the log snapshot file for reading";
+                break;
+            }
+            std::ostringstream buffer;
+            buffer << file.rdbuf();
+            current = buffer.str();
+            attemptOk = true;
+        }
+        while (false);
+
+        if (!attemptOk)
+            break; // keep whatever an earlier attempt in this call already produced, if any
+
+        ok = true;
+        contents = current;
+        error.clear();
+
+        const std::string filtered = StripSnapshotNoise(current, pathUtf8);
+        if (havePrevious && filtered == previousFiltered)
+            break; // no new (non-bookkeeping) content since the last attempt: settled
+        previousFiltered = filtered;
+        havePrevious = true;
+
+        if (attempt + 1 < kMaxSnapshotAttempts)
+            std::this_thread::sleep_for(std::chrono::milliseconds(kSnapshotSettleStepMs));
+    }
+
+    std::lock_guard<std::mutex> lock(g_logCaptureMutex);
+    g_logCapture.lastSnapshotOk = ok;
+    return ok;
 }
 
 } // namespace
@@ -1576,6 +1800,232 @@ bool GetFunctionRange(unsigned long long address, unsigned long long& start, uns
         error = "Internal error while retrieving the function boundaries";
         return false;
     }
+}
+
+bool ExecuteCommand(const std::string& command, bool async, CommandResult& out, std::string& error)
+{
+    out = CommandResult{};
+    try
+    {
+        if (command.empty())
+        {
+            error = "Command must not be empty";
+            return false;
+        }
+
+        // Deliberately no RequireDebugging check here: only some commands
+        // need an active session (e.g. analysis does, ClearLog does not),
+        // and the debugger itself already rejects what it cannot run —
+        // that answer is passed through via out.accepted rather than
+        // second-guessed here.
+        std::string before, beforeError;
+        const bool haveBefore = SnapshotLog(before, beforeError);
+
+        if (async)
+        {
+            // Queued onto x64dbg's own command thread: DbgCmdExec's return
+            // value only reports that the command was accepted into the
+            // queue, not that it has run or succeeded. Commands that change
+            // execution state (run, StepInto, ...) must go through this
+            // path — running them directly on the worker thread could
+            // deadlock with or race the debug loop. Callers that need to
+            // know the outcome should wait for a pause separately.
+            out.accepted = DbgCmdExec(command.c_str());
+        }
+        else
+        {
+            out.accepted = DbgCmdExecDirect(command.c_str());
+        }
+
+        std::string after, afterError;
+        const bool haveAfter = SnapshotLog(after, afterError);
+        out.logCaptured = haveBefore && haveAfter;
+        if (haveBefore && haveAfter && after.size() > before.size())
+            out.output = StripSnapshotNoise(after.substr(before.size()), LogCaptureFilePath());
+
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while executing the command";
+        return false;
+    }
+}
+
+bool RunScript(const std::string& scriptText, CommandResult& out, std::string& error)
+{
+    out = CommandResult{};
+    try
+    {
+        if (scriptText.empty())
+        {
+            error = "Script text must not be empty";
+            return false;
+        }
+
+        char tempDir[MAX_PATH] = {};
+        if (GetTempPathA(MAX_PATH, tempDir) == 0)
+        {
+            error = "Failed to determine a temporary directory for the script file";
+            return false;
+        }
+        char scriptPath[MAX_PATH] = {};
+        sprintf_s(scriptPath, "%smcp-script-%lu-%llu.txt", tempDir, GetCurrentProcessId(),
+                  static_cast<unsigned long long>(GetTickCount64()));
+
+        {
+            std::ofstream scriptFile(scriptPath, std::ios::binary);
+            if (!scriptFile)
+            {
+                error = "Failed to create the temporary script file";
+                return false;
+            }
+            scriptFile.write(scriptText.data(), static_cast<std::streamsize>(scriptText.size()));
+        }
+
+        std::string before, beforeError;
+        const bool haveBefore = SnapshotLog(before, beforeError);
+
+        DbgScriptLoad(scriptPath);
+        // destline == 0 runs the whole script from the beginning (same as
+        // the "scriptrun" command with no argument, see cbScriptRun in
+        // external/x64dbg/src/dbg/commands/cmd-script.cpp).
+        DbgScriptRun(0);
+        out.accepted = true; // the script was successfully handed to the debugger to run
+
+        // DbgScriptLoad already read the whole file into memory, so it is
+        // safe to delete it now even though DbgScriptRun keeps executing
+        // asynchronously afterwards.
+        DeleteFileA(scriptPath);
+
+        // Script execution is asynchronous: DbgScriptRun queues the run and
+        // returns immediately, so out.output only carries whatever log text
+        // appeared before this call returned, not the script's full output.
+        std::string after, afterError;
+        const bool haveAfter = SnapshotLog(after, afterError);
+        out.logCaptured = haveBefore && haveAfter;
+        if (haveBefore && haveAfter && after.size() > before.size())
+            out.output = StripSnapshotNoise(after.substr(before.size()), LogCaptureFilePath());
+
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while running the script";
+        return false;
+    }
+}
+
+bool ReadLog(size_t maxLines, std::vector<std::string>& out, bool& truncated, std::string& error)
+{
+    out.clear();
+    truncated = false;
+    try
+    {
+        // Reading the log while capture is not active, or while a snapshot
+        // cannot be taken, is not an error: it is a normal situation, and
+        // the caller should get an empty result it can reason about, not a
+        // failure that looks like the tool is broken.
+        std::string contents;
+        if (!SnapshotLog(contents, error))
+        {
+            error.clear();
+            return true;
+        }
+
+        if (maxLines == 0 || maxLines > kMaxLogLines)
+            maxLines = kMaxLogLines;
+
+        const std::string snapshotPathUtf8 = LogCaptureFilePath();
+        std::vector<std::string> lines;
+        std::istringstream stream(contents);
+        std::string line;
+        while (std::getline(stream, line))
+        {
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            if (LineMentionsSnapshotPath(line, snapshotPathUtf8))
+                continue; // this mechanism's own bookkeeping, not part of the captured log
+            lines.push_back(std::move(line));
+        }
+
+        if (lines.size() > maxLines)
+        {
+            lines.erase(lines.begin(), lines.end() - static_cast<std::ptrdiff_t>(maxLines));
+            truncated = true;
+        }
+
+        out = std::move(lines);
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        truncated = false;
+        error = "Internal error while reading the log";
+        return false;
+    }
+}
+
+bool StartLogCapture(std::string& error)
+{
+    try
+    {
+        const wchar_t* userDir = BridgeUserDirectory();
+        if (!userDir)
+        {
+            error = "Failed to determine the user directory for the log capture file";
+            return false;
+        }
+
+        wchar_t path[MAX_PATH] = {};
+        swprintf_s(path, L"%s\\mcp-log-%lu.txt", userDir, GetCurrentProcessId());
+
+        {
+            std::lock_guard<std::mutex> lock(g_logCaptureMutex);
+            g_logCapture.filePath = path;
+        }
+
+        // Take one snapshot now and treat its length as the starting point,
+        // so output produced before the server started is not returned as
+        // if it were a command's own output.
+        std::string contents;
+        if (!SnapshotLog(contents, error))
+            return false;
+
+        std::lock_guard<std::mutex> lock(g_logCaptureMutex);
+        g_logCapture.deliveredBytes = contents.size();
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while starting log capture";
+        return false;
+    }
+}
+
+void StopLogCapture()
+{
+    std::lock_guard<std::mutex> lock(g_logCaptureMutex);
+    g_logCapture = LogCaptureState{};
+}
+
+bool IsLogCaptureActive()
+{
+    std::lock_guard<std::mutex> lock(g_logCaptureMutex);
+    return !g_logCapture.filePath.empty() && g_logCapture.lastSnapshotOk;
+}
+
+std::string LogCaptureFilePath()
+{
+    std::wstring path;
+    {
+        std::lock_guard<std::mutex> lock(g_logCaptureMutex);
+        path = g_logCapture.filePath;
+    }
+    if (path.empty())
+        return {};
+    return WideToUtf8(path);
 }
 
 } // namespace x64dbg_mcp::plugin
