@@ -22,7 +22,13 @@ public:
     // bridge starts before the user opens x64dbg, and must not fail because
     // of that (see the .cpp). Nothing escapes outward except ToolError with
     // English text suitable for showing to the model.
-    nlohmann::json Call(const std::string& method, const nlohmann::json& params);
+    //
+    // requestTimeoutMs, if non-zero, overrides the link's default wait for
+    // THIS call only. How long a caller needs to wait is a property of the
+    // requested operation (e.g. a multi-minute trace), not of the
+    // transport — a single fixed transport timeout would silently
+    // truncate every legitimate long operation.
+    nlohmann::json Call(const std::string& method, const nlohmann::json& params, int requestTimeoutMs = 0);
 
     // Checks whether the plugin is available, without throwing.
     bool IsAvailable();
@@ -31,9 +37,10 @@ public:
 
 private:
     // Sends a single request over the already established (or just
-    // established) connection. Returns false on a transport failure — then
-    // Call() decides whether to reconnect and retry.
-    bool SendLocked(const std::string& method, const nlohmann::json& params, std::string& response);
+    // established) connection, waiting up to timeoutMs for the response.
+    // Returns false on a transport failure — then Call() decides whether to
+    // reconnect and retry.
+    bool SendLocked(const std::string& method, const nlohmann::json& params, std::string& response, int timeoutMs);
 
     // Parses and validates the plugin's response; throws ToolError on any
     // protocol mismatch or on an error from the plugin itself (passing its
@@ -41,7 +48,11 @@ private:
     nlohmann::json ParseResponse(const std::string& method, const std::string& response) const;
 
     // Builds a transport error message based on the client's LastError().
-    std::string TransportErrorMessage(const std::string& method) const;
+    // If the transport gave up waiting for the response, says so
+    // explicitly and states how long it waited (timeoutMs), so the model
+    // can tell a stuck plugin from an operation that just needs a longer
+    // 'timeout_ms' instead of confusing the two.
+    std::string TransportErrorMessage(const std::string& method, int timeoutMs) const;
 
     std::string pipeName_;
     int connectTimeoutMs_;

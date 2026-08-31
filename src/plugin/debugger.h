@@ -368,4 +368,59 @@ bool ApplyPatchesToFile(const std::string& filePath, int& patched, std::string& 
 // WriteMemory.
 bool SetPageProtection(unsigned long long address, const std::string& rights, std::string& error);
 
+// Bounds on maxSteps for TraceUntil: keeps a runaway request from tying up
+// the debugger indefinitely while still allowing traces long enough to
+// cross a large virtualized handler.
+constexpr int kMinTraceSteps = 1;
+constexpr int kMaxTraceSteps = 10000000;
+
+// Traces until condition holds or maxSteps is reached. mode is "into" or
+// "over" (stepping over calls). Requires active debugging and a pause; uses
+// the same wait-for-pause mechanism as Step/Control, so the result reports
+// whether tracing ended in a pause, a timeout, or the process exiting (via
+// out.status).
+bool TraceUntil(const std::string& mode, const std::string& condition, int maxSteps,
+                int timeoutMs, ControlResult& out, std::string& error);
+
+// Starts or stops recording executed instructions to filePath. Starting
+// recording alone does not trace anything: only instructions that a trace
+// command (e.g. TraceUntil) actually executes while recording is active are
+// stored to the file. Requires active debugging.
+bool TraceRecordToFile(bool start, const std::string& filePath, std::string& error);
+
+// Runs until user code is reached, using temporary memory breakpoints on
+// user code pages rather than single-stepping. Requires active debugging.
+// Documented limitation: fails if another RunToUserCode is already running.
+bool RunToUserCode(int timeoutMs, ControlResult& out, std::string& error);
+
+// One address with a non-zero trace record hit count.
+struct CoverageEntry
+{
+    unsigned long long address = 0;
+    unsigned int hitCount = 0;
+    std::string byteType;   // readable TRACERECORDBYTETYPE, e.g. "instructionBody"
+};
+
+// Upper limits for ReadCoverage: bounds the amount of memory scanned and the
+// number of entries returned by a single call, for the same reason as the
+// analogous limits on FindPattern.
+constexpr unsigned long long kMaxCoverageRangeSize = 16ull * 1024ull * 1024ull; // 16 MiB
+constexpr size_t kMaxCoverageEntries = 4096;
+
+// Enables trace record coverage tracking for the page containing address.
+// Trace record state is tracked per memory PAGE, so this affects every
+// address on that page, not just the one given. granularity is one of
+// "bit" (execution only), "byte", "word" (byte/word add a hit counter and
+// access-type tracking). Requires active debugging.
+bool EnableCoverage(unsigned long long address, const std::string& granularity, std::string& error);
+
+// Disables trace record coverage tracking for the page containing address.
+bool DisableCoverage(unsigned long long address, std::string& error);
+
+// Reads trace record hit counts over [start, start + size). Entries with
+// zero hits are omitted. truncated is set when kMaxCoverageEntries was
+// reached before the whole range was scanned. Requires active debugging.
+bool ReadCoverage(unsigned long long start, unsigned long long size,
+                  std::vector<CoverageEntry>& out, bool& truncated, std::string& error);
+
 } // namespace x64dbg_mcp::plugin

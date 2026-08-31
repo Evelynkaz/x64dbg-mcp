@@ -6,9 +6,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 using x64dbg_mcp::PipeServer;
 using x64dbg_mcp::PipeClient;
@@ -305,6 +307,153 @@ TEST_CASE("pipe: protocol major version mismatch rejects the connection (defect 
     CHECK_FALSE(client.Connect(pipeName, 2000));
     CHECK_FALSE(client.LastError().empty());
     CHECK_FALSE(client.IsConnected());
+
+    server.Stop();
+}
+
+TEST_CASE("pipe: a vanished client does not block a second connection (defect: single-instance pipe)") {
+    const std::string pipeName = MakePipeName();
+
+    PipeServer server;
+    REQUIRE(server.Start(pipeName, [](const std::string& request) {
+        return request + "-pong";
+    }));
+
+    {
+        // The PipeClient API has no rawer teardown than this: its destructor
+        // closes the handle (CancelIoEx + CloseHandle) without sending any
+        // application-level goodbye — the protocol has none. This is the
+        // closest thing to the client process just vanishing mid-conversation
+        // while it is still connected.
+        PipeClient client;
+        REQUIRE(client.Connect(pipeName, 2000));
+        std::string response;
+        REQUIRE(client.SendRequest("ping", response, 2000));
+        CHECK(response == "ping-pong");
+    } // client destroyed here, with no further request pending
+
+    PipeClient second;
+    REQUIRE(second.Connect(pipeName, 2000));
+    std::string response;
+    REQUIRE(second.SendRequest("ping", response, 2000));
+    CHECK(response == "ping-pong");
+
+    server.Stop();
+}
+
+TEST_CASE("pipe: two clients connected at the same time are served correctly and not swapped") {
+    const std::string pipeName = MakePipeName();
+
+    PipeServer server;
+    REQUIRE(server.Start(pipeName, [](const std::string& request) {
+        return "resp:" + request;
+    }));
+
+    PipeClient clientA;
+    REQUIRE(clientA.Connect(pipeName, 2000));
+    PipeClient clientB;
+    REQUIRE(clientB.Connect(pipeName, 2000));
+
+    std::atomic<bool> aOk{true};
+    std::atomic<bool> bOk{true};
+
+    std::thread threadA([&]() {
+        for (int i = 0; i < 30; ++i)
+        {
+            const std::string request = "A:" + std::to_string(i);
+            std::string response;
+            if (!clientA.SendRequest(request, response, 2000) || response != "resp:" + request)
+                aOk = false;
+        }
+    });
+
+    std::thread threadB([&]() {
+        for (int i = 0; i < 30; ++i)
+        {
+            const std::string request = "B:" + std::to_string(i);
+            std::string response;
+            if (!clientB.SendRequest(request, response, 2000) || response != "resp:" + request)
+                bOk = false;
+        }
+    });
+
+    threadA.join();
+    threadB.join();
+
+    CHECK(aOk.load());
+    CHECK(bOk.load());
+
+    server.Stop();
+}
+
+TEST_CASE("pipe: stopping with several connections open completes promptly") {
+    const std::string pipeName = MakePipeName();
+
+    PipeServer server;
+    REQUIRE(server.Start(pipeName, [](const std::string& request) {
+        return request;
+    }));
+
+    constexpr int kClients = 5;
+    std::vector<std::unique_ptr<PipeClient>> clients;
+    for (int i = 0; i < kClients; ++i)
+    {
+        auto client = std::make_unique<PipeClient>();
+        REQUIRE(client->Connect(pipeName, 2000));
+        std::string response;
+        REQUIRE(client->SendRequest("hello", response, 2000));
+        clients.push_back(std::move(client));
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    server.Stop();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    CHECK(elapsed < std::chrono::seconds(2));
+    CHECK_FALSE(server.IsRunning());
+}
+
+TEST_CASE("pipe: exceeding the connection limit does not crash the server, which keeps serving") {
+    const std::string pipeName = MakePipeName();
+
+    PipeServer server;
+    REQUIRE(server.Start(pipeName, [](const std::string& request) {
+        return request + "-pong";
+    }));
+
+    // More clients than the server's concurrent-connection bound. Some of
+    // these connect attempts may themselves fail (ERROR_PIPE_BUSY, or the
+    // connection being closed right after being accepted) — that is fine and
+    // expected; what matters is that the server does not crash and keeps
+    // serving afterward.
+    constexpr int kClients = 12;
+    std::vector<std::unique_ptr<PipeClient>> clients;
+    for (int i = 0; i < kClients; ++i)
+    {
+        auto client = std::make_unique<PipeClient>();
+        client->Connect(pipeName, 500);
+        clients.push_back(std::move(client));
+    }
+    clients.clear(); // drop the excess connections
+
+    // The server notices each dropped connection asynchronously (a
+    // connection thread has to wake up and see the broken pipe before it
+    // decrements the connection count), so a fresh connection right after
+    // clients.clear() can still land in the narrow window where the count
+    // has not caught up yet and gets bound-rejected — that is correct
+    // behavior, not a bug, so retry for a bit rather than a single attempt.
+    bool ok = false;
+    std::string response;
+    for (int attempt = 0; attempt < 30 && !ok; ++attempt)
+    {
+        PipeClient client;
+        if (client.Connect(pipeName, 500) && client.SendRequest("ping", response, 2000))
+            ok = true;
+        else
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    REQUIRE(ok);
+    CHECK(response == "ping-pong");
 
     server.Stop();
 }

@@ -218,6 +218,25 @@ bool GetRequiredStringParam(const nlohmann::json& params, const char* name, std:
     return true;
 }
 
+// Extracts an optional string from params. A missing parameter is not an
+// error, defaultValue is used instead.
+bool GetOptionalStringParam(const nlohmann::json& params, const char* name, const std::string& defaultValue,
+                             std::string& out, std::string& error)
+{
+    if (!params.is_object() || !params.contains(name))
+    {
+        out = defaultValue;
+        return true;
+    }
+    if (!params[name].is_string())
+    {
+        error = std::string("Parameter \"") + name + "\" must be a string";
+        return false;
+    }
+    out = params[name].get<std::string>();
+    return true;
+}
+
 nlohmann::json StatusToJson(const DebuggerStatus& status)
 {
     nlohmann::json result;
@@ -1528,6 +1547,198 @@ std::string HandleMemorySetRights(DebuggerWorker& worker, const nlohmann::json& 
     return BuildOkResponse(id, result);
 }
 
+std::string HandleTraceUntil(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string paramError;
+    std::string mode;
+    if (!GetRequiredStringParam(params, "mode", mode, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    std::string condition;
+    if (!GetRequiredStringParam(params, "condition", condition, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    int maxSteps = 100000;
+    if (!GetOptionalIntParam(params, "max_steps", 100000, maxSteps, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    int timeoutMs = 0;
+    if (!GetOptionalIntParam(params, "timeout_ms", 0, timeoutMs, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    const int submitTimeoutMs = ClampControlTimeout(timeoutMs) + kWaitSubmitSlackMs;
+
+    auto outcome = std::make_shared<ControlOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, mode, condition, maxSteps, timeoutMs]
+        { outcome->ok = TraceUntil(mode, condition, maxSteps, timeoutMs, outcome->result, outcome->error); },
+        submitTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    return BuildOkResponse(id, ControlResultToJson(outcome->result));
+}
+
+std::string HandleTraceRecord(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string paramError;
+    std::string action;
+    if (!GetRequiredStringParam(params, "action", action, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+    if (action != "start" && action != "stop")
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, "Parameter \"action\" must be one of start, stop");
+
+    std::string path;
+    if (action == "start" && !GetRequiredStringParam(params, "path", path, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    const bool start = (action == "start");
+    auto outcome = std::make_shared<ControlOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, start, path]
+        {
+            outcome->ok = TraceRecordToFile(start, path, outcome->error);
+            outcome->result.status = GetStatus();
+        },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    return BuildOkResponse(id, ControlResultToJson(outcome->result));
+}
+
+std::string HandleTraceRunToUserCode(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string paramError;
+    int timeoutMs = 0;
+    if (!GetOptionalIntParam(params, "timeout_ms", 0, timeoutMs, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    const int submitTimeoutMs = ClampControlTimeout(timeoutMs) + kWaitSubmitSlackMs;
+
+    auto outcome = std::make_shared<ControlOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, timeoutMs] { outcome->ok = RunToUserCode(timeoutMs, outcome->result, outcome->error); },
+        submitTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    return BuildOkResponse(id, ControlResultToJson(outcome->result));
+}
+
+std::string HandleCoverageEnable(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    std::string granularity = "byte";
+    if (!GetOptionalStringParam(params, "granularity", "byte", granularity, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<WriteOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address, granularity] { outcome->ok = EnableCoverage(address, granularity, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["address"] = address;
+    result["granularity"] = granularity;
+    return BuildOkResponse(id, result);
+}
+
+std::string HandleCoverageDisable(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<WriteOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address] { outcome->ok = DisableCoverage(address, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["address"] = address;
+    return BuildOkResponse(id, result);
+}
+
+struct CoverageReadOutcome
+{
+    bool ok = false;
+    std::vector<CoverageEntry> entries;
+    bool truncated = false;
+    std::string error;
+};
+
+std::string HandleCoverageRead(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long start = 0, size = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "start", start, paramError) ||
+        !GetUint64Param(params, "size", size, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<CoverageReadOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, start, size]
+        { outcome->ok = ReadCoverage(start, size, outcome->entries, outcome->truncated, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json entries = nlohmann::json::array();
+    for (const auto& entry : outcome->entries)
+    {
+        nlohmann::json item;
+        item["address"] = entry.address;
+        item["hitCount"] = entry.hitCount;
+        item["byteType"] = entry.byteType;
+        entries.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["entries"] = entries;
+    result["truncated"] = outcome->truncated;
+    return BuildOkResponse(id, result);
+}
+
 // Debug state callbacks. Run on x64dbg's own debugger threads, so they must
 // be as short as possible and never throw: DebugStateTracker itself never throws.
 void CbInitDebug(CBTYPE, void*) { McpService::Instance().Tracker().NotifyDebugStarted(); }
@@ -1721,6 +1932,18 @@ std::string McpService::HandleRequest(const std::string& request)
         return HandlePatchesApplyToFile(worker_, id, params);
     if (method == "memory.set_rights")
         return HandleMemorySetRights(worker_, id, params);
+    if (method == "trace.until")
+        return HandleTraceUntil(worker_, id, params);
+    if (method == "trace.record")
+        return HandleTraceRecord(worker_, id, params);
+    if (method == "trace.run_to_user_code")
+        return HandleTraceRunToUserCode(worker_, id, params);
+    if (method == "coverage.enable")
+        return HandleCoverageEnable(worker_, id, params);
+    if (method == "coverage.disable")
+        return HandleCoverageDisable(worker_, id, params);
+    if (method == "coverage.read")
+        return HandleCoverageRead(worker_, id, params);
 
     return BuildErrorResponse(id, ipc::ErrorCode::UnknownMethod, "Unknown method: " + method);
 }

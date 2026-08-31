@@ -5,7 +5,9 @@
 #include "doctest/doctest.h"
 
 #include <atomic>
+#include <chrono>
 #include <string>
+#include <thread>
 
 using x64dbg_mcp::PipeServer;
 using x64dbg_mcp::bridge::PluginLink;
@@ -38,7 +40,91 @@ PipeServer::RequestHandler MakeOkHandler(const nlohmann::json& result)
     };
 }
 
+// A fake plugin handler that sleeps before responding, to exercise
+// per-call timeouts against a handler that takes a known amount of time.
+PipeServer::RequestHandler MakeSlowOkHandler(int sleepMs, const nlohmann::json& result)
+{
+    return [sleepMs, result](const std::string& request) -> std::string
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+        const nlohmann::json parsed = nlohmann::json::parse(request);
+        return nlohmann::json{
+            {"id", parsed.at("id")},
+            {"ok", true},
+            {"result", result}
+        }.dump();
+    };
+}
+
 } // namespace
+
+TEST_CASE("plugin_link: a per-call timeout shorter than the handler's delay times out") {
+    const std::string pipeName = MakePipeName();
+
+    PipeServer server;
+    REQUIRE(server.Start(pipeName, MakeSlowOkHandler(800, {{"ping", 1}})));
+
+    // The link's own default (3000 ms) is long enough to succeed; only a
+    // per-call timeout shorter than the handler's delay should fail.
+    PluginLink link(pipeName, 1000, 3000);
+
+    bool threw = false;
+    try
+    {
+        link.Call("debugger.status", nlohmann::json::object(), 200);
+    }
+    catch (const ToolError& e)
+    {
+        threw = true;
+        const std::string message = e.what();
+        CHECK(message.find("200 ms") != std::string::npos);
+        CHECK(message.find("timeout_ms") != std::string::npos);
+    }
+    CHECK(threw);
+
+    server.Stop();
+}
+
+TEST_CASE("plugin_link: a per-call timeout longer than the handler's delay succeeds") {
+    const std::string pipeName = MakePipeName();
+
+    PipeServer server;
+    REQUIRE(server.Start(pipeName, MakeSlowOkHandler(800, {{"ping", 2}})));
+
+    // The link's own default (300 ms) is too short for the handler's
+    // delay; only the longer per-call timeout should let this succeed.
+    PluginLink link(pipeName, 1000, 300);
+
+    const nlohmann::json result = link.Call("debugger.status", nlohmann::json::object(), 5000);
+    CHECK(result["ping"] == 2);
+
+    server.Stop();
+}
+
+TEST_CASE("plugin_link: a call without a per-call timeout uses the link's default") {
+    const std::string pipeName = MakePipeName();
+
+    PipeServer server;
+    REQUIRE(server.Start(pipeName, MakeSlowOkHandler(800, {{"ping", 3}})));
+
+    // No per-call timeout is given, so the link's short default (300 ms)
+    // must be the one that applies, and the call must time out against
+    // the handler's 800 ms delay.
+    PluginLink link(pipeName, 1000, 300);
+
+    bool threw = false;
+    try
+    {
+        link.Call("debugger.status", nlohmann::json::object());
+    }
+    catch (const ToolError&)
+    {
+        threw = true;
+    }
+    CHECK(threw);
+
+    server.Stop();
+}
 
 TEST_CASE("plugin_link: a successful call returns the content of result") {
     const std::string pipeName = MakePipeName();

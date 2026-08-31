@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <initializer_list>
+#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -13,6 +14,42 @@ namespace x64dbg_mcp::bridge
 
 namespace
 {
+
+// The plugin waits this long for a pause/completion when a tool omits
+// 'timeout_ms' (mirrors kDefaultControlTimeoutMs in plugin/debugger.h,
+// which lives in the plugin's own binary and is not visible from here;
+// kept in sync by hand — if the plugin's default ever changes, this
+// constant must change with it).
+constexpr long long kDefaultOperationTimeoutMs = 10000;
+
+// Extra time given to the transport on top of the operation's own
+// timeout. The wait for a pause/completion happens on the plugin side and
+// is bounded by the operation's own timeout_ms; the plugin still needs
+// time after that to build and send its response back, so the transport
+// timeout must outlive it — otherwise the bridge would give up on a
+// legitimate long-running operation before the plugin itself does.
+constexpr long long kRequestTimeoutMarginMs = 15000;
+
+// A generous fixed request timeout for tools that can run long without
+// taking a 'timeout_ms' of their own: code_coverage's 'read' scans a
+// range, find_pattern scans up to 256 MiB, execute_command may run an
+// arbitrary (possibly slow) command, and run_script runs a script.
+constexpr int kSlowToolRequestTimeoutMs = 120000;
+
+// Request timeout for a call whose 'params' may carry a 'timeout_ms' the
+// tool is about to forward to the plugin: the operation's own timeout (or
+// the plugin's default, if none was given) plus a margin for the plugin
+// to answer after that wait ends.
+int RequestTimeoutMs(const nlohmann::json& params)
+{
+    const long long operationTimeoutMs = params.contains("timeout_ms")
+        ? params["timeout_ms"].get<long long>()
+        : kDefaultOperationTimeoutMs;
+    const long long requestTimeoutMs = operationTimeoutMs + kRequestTimeoutMarginMs;
+    return requestTimeoutMs > (std::numeric_limits<int>::max)()
+        ? (std::numeric_limits<int>::max)()
+        : static_cast<int>(requestTimeoutMs);
+}
 
 // Parses a hex string (as sent by memory.read) into bytes. Silently stops
 // at the first invalid character — we trust the plugin, but it's not worth
@@ -877,6 +914,74 @@ std::string FormatSetPageRightsResult(const nlohmann::json& result)
     return out.str();
 }
 
+// Human-readable summary of trace.record: confirms that recording either
+// started (with the destination path) or stopped. Recording itself does
+// not execute anything, so there is nothing else to report here.
+std::string FormatTraceRecordResult(const std::string& action, const std::string& path)
+{
+    std::ostringstream out;
+    if (action == "start")
+        out << "Trace recording started, writing to " << path << ".";
+    else
+        out << "Trace recording stopped.";
+    return out.str();
+}
+
+// Human-readable summary of coverage.enable / coverage.disable: confirms
+// the address and, for 'enable', the granularity that was applied.
+// Coverage is tracked per memory page, so this always covers the whole
+// page containing the given address.
+std::string FormatCoverageToggleResult(const std::string& action, std::uint64_t address,
+                                        const std::string& granularity)
+{
+    std::ostringstream out;
+    if (action == "enable")
+        out << "Coverage enabled for the page containing 0x" << std::hex << address
+            << " (granularity: '" << granularity << "').";
+    else
+        out << "Coverage disabled for the page containing 0x" << std::hex << address << ".";
+    return out.str();
+}
+
+// Table of coverage.read entries — address, hit count, byte type — sorted
+// by hit count descending, so the busiest address (typically a virtual
+// machine's dispatcher) is first. Followed by a count line and, if the
+// result was truncated, a line about it. Sorting is for the text only;
+// the structured entries are passed through in the order the plugin sent them.
+std::string FormatCoverageRead(const nlohmann::json& result)
+{
+    const nlohmann::json entries = result.value("entries", nlohmann::json::array());
+    std::vector<nlohmann::json> sorted(entries.begin(), entries.end());
+    std::sort(sorted.begin(), sorted.end(), [](const nlohmann::json& a, const nlohmann::json& b)
+    {
+        return a.value("hitCount", 0ULL) > b.value("hitCount", 0ULL);
+    });
+
+    std::ostringstream out;
+    out << std::left
+        << std::setw(18) << "Address"
+        << std::setw(10) << "Hits"
+        << "Type" << '\n';
+    for (const auto& entry : sorted)
+    {
+        const std::uint64_t address = entry.value("address", 0ULL);
+        const unsigned long long hitCount = entry.value("hitCount", 0ULL);
+        const std::string byteType = entry.value("byteType", std::string());
+
+        std::ostringstream addressText;
+        addressText << "0x" << std::hex << address;
+
+        out << std::left
+            << std::setw(18) << addressText.str()
+            << std::setw(10) << hitCount
+            << byteType << '\n';
+    }
+    out << std::dec << sorted.size() << " entr" << (sorted.size() == 1 ? "y" : "ies") << ".\n";
+    if (result.value("truncated", false))
+        out << "Result truncated; more coverage entries may exist.\n";
+    return out.str();
+}
+
 } // namespace
 
 void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> link)
@@ -1141,7 +1246,7 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         }
 
         ToolResult result;
-        result.structuredContent = link->Call("debug.control", params);
+        result.structuredContent = link->Call("debug.control", params, RequestTimeoutMs(params));
         result.text = FormatPauseResult(result.structuredContent);
         return result;
     };
@@ -1236,7 +1341,7 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         }
 
         ToolResult result;
-        result.structuredContent = link->Call("debug.step", params);
+        result.structuredContent = link->Call("debug.step", params, RequestTimeoutMs(params));
         result.text = FormatPauseResult(result.structuredContent);
         return result;
     };
@@ -1282,7 +1387,7 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         }
 
         ToolResult result;
-        result.structuredContent = link->Call("debug.wait", params);
+        result.structuredContent = link->Call("debug.wait", params, RequestTimeoutMs(params));
         result.text = FormatPauseResult(result.structuredContent);
         return result;
     };
@@ -2092,7 +2197,7 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         params["max_results"] = maxResults;
 
         ToolResult result;
-        result.structuredContent = link->Call("pattern.find", params);
+        result.structuredContent = link->Call("pattern.find", params, kSlowToolRequestTimeoutMs);
         result.text = FormatPatternMatches(result.structuredContent);
         return result;
     };
@@ -2260,7 +2365,7 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         result.structuredContent = link->Call("command.exec", {
             {"command", command},
             {"async", async}
-        });
+        }, kSlowToolRequestTimeoutMs);
         result.text = FormatCommandResult(result.structuredContent);
         return result;
     };
@@ -2305,7 +2410,7 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         ToolResult result;
         result.structuredContent = link->Call("script.run", {
             {"script", script}
-        });
+        }, kSlowToolRequestTimeoutMs);
         result.text = FormatScriptResult(result.structuredContent);
         return result;
     };
@@ -2744,6 +2849,374 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(setPageRights));
+
+    Tool traceUntil;
+    traceUntil.name = "trace_until";
+    traceUntil.description =
+        "Run the debuggee one instruction at a time INSIDE the debugger, "
+        "without returning to the model after each step, until a chosen "
+        "condition becomes true or a step budget is exhausted — then stop "
+        "and report where execution ended up. 'into' follows calls into "
+        "the called function; 'over' executes each call as a single unit "
+        "without entering it. WHY THIS MATTERS: the whole trace runs "
+        "inside x64dbg, so a trace of a million instructions costs one "
+        "tool call, not a million. Stepping through obfuscated or "
+        "virtualised code with the step tool, one instruction and one "
+        "round trip at a time, is not practical — this is the tool built "
+        "for that. 'condition' is an x64dbg expression, the same "
+        "language evaluate_expression uses; if unsure what an expression "
+        "evaluates to, try it there first. Examples: 'rip == "
+        "0x140001000' stops when execution reaches that address; 'rax == "
+        "0' stops when a register takes a given value; '[rsp] == "
+        "0x1234' stops when a memory location holds a given value; "
+        "expressions like 'dis.iscall(rip)' stop on a given kind of "
+        "instruction, here the next call. Requires the process to be "
+        "paused when the call starts. 'max_steps' bounds how many "
+        "instructions run even if the condition never becomes true, from "
+        "1 to 10000000; it defaults to 100000. Returns the same shape as "
+        "the step tools: 'paused', 'timed_out', 'pause_reason', and "
+        "'status'. If neither the condition nor the step budget is "
+        "reached before 'timeout_ms' elapses, 'timed_out' is true and "
+        "the process is still running — this is not an error, just a "
+        "sign the trace needs a tighter condition or more time.";
+    traceUntil.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"mode", {
+                {"type", "string"},
+                {"enum", nlohmann::json::array({"into", "over"})},
+                {"description",
+                 "'into' follows calls into the called function, 'over' executes "
+                 "each call as a single unit without entering it."}
+            }},
+            {"condition", {
+                {"type", "string"},
+                {"description",
+                 "x64dbg expression evaluated after every instruction; the trace "
+                 "stops once it is non-zero. Same language as evaluate_expression. "
+                 "Examples: 'rip == 0x140001000', 'rax == 0', '[rsp] == 0x1234', "
+                 "'dis.iscall(rip)'."}
+            }},
+            {"max_steps", {
+                {"type", "integer"},
+                {"minimum", 1},
+                {"maximum", 10000000},
+                {"default", 100000},
+                {"description",
+                 "Maximum number of instructions to execute even if 'condition' "
+                 "never becomes true, from 1 to 10000000."}
+            }},
+            {"timeout_ms", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Maximum time to wait for the trace to finish, in milliseconds. "
+                 "If omitted, the plugin's default timeout is used."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"mode", "condition"})},
+        {"additionalProperties", false}
+    };
+    traceUntil.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("trace_until: plugin link is not configured");
+
+        const std::string mode = RequireEnumString(arguments, "mode", {"into", "over"}, "trace_until");
+        if (!arguments.contains("condition") || !arguments["condition"].is_string())
+            throw ToolError("trace_until: 'condition' is required and must be a string");
+        const std::string condition = arguments["condition"].get<std::string>();
+
+        long long maxSteps = 100000;
+        if (arguments.contains("max_steps"))
+        {
+            if (!arguments["max_steps"].is_number_integer())
+                throw ToolError("trace_until: 'max_steps' must be an integer between 1 and 10000000");
+            maxSteps = arguments["max_steps"].get<long long>();
+            if (maxSteps < 1 || maxSteps > 10000000)
+                throw ToolError("trace_until: 'max_steps' must be between 1 and 10000000");
+        }
+
+        nlohmann::json params = {
+            {"mode", mode},
+            {"condition", condition},
+            {"max_steps", maxSteps}
+        };
+        if (arguments.contains("timeout_ms"))
+        {
+            RequireNonNegativeInteger(arguments, "timeout_ms", "trace_until");
+            params["timeout_ms"] = arguments["timeout_ms"].get<long long>();
+        }
+
+        ToolResult result;
+        result.structuredContent = link->Call("trace.until", params, RequestTimeoutMs(params));
+        result.text = FormatPauseResult(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(traceUntil));
+
+    Tool traceRecord;
+    traceRecord.name = "trace_record";
+    traceRecord.description =
+        "Start or stop recording every instruction the debuggee executes "
+        "into a trace file that x64dbg can open and browse afterwards. "
+        "Recording by itself does not execute anything: call this tool "
+        "with action 'start', then run or trace the process "
+        "(debug_control, step, or trace_until), then call this tool "
+        "again with action 'stop' — the file ends up holding exactly the "
+        "instructions that were actually executed while recording was "
+        "on. Use it to capture a full execution path for later study, to "
+        "compare two runs of the same code, or to recover the real "
+        "control flow of obfuscated code that a static disassembly "
+        "cannot show. Requires an active debugging session. Parameters: "
+        "'action' — 'start' or 'stop'; 'path' — destination file path "
+        "for the trace, required when 'action' is 'start' and ignored "
+        "otherwise.";
+    traceRecord.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"action", {
+                {"type", "string"},
+                {"enum", nlohmann::json::array({"start", "stop"})},
+                {"description", "'start' begins recording to 'path', 'stop' ends recording."}
+            }},
+            {"path", {
+                {"type", "string"},
+                {"description",
+                 "Destination file path for the trace. Required when 'action' is "
+                 "'start', ignored otherwise."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"action"})},
+        {"allOf", nlohmann::json::array({
+            {
+                {"if", {
+                    {"properties", {{"action", {{"const", "start"}}}}},
+                    {"required", nlohmann::json::array({"action"})}
+                }},
+                {"then", {{"required", nlohmann::json::array({"action", "path"})}}}
+            }
+        })},
+        {"additionalProperties", false}
+    };
+    traceRecord.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("trace_record: plugin link is not configured");
+
+        const std::string action = RequireEnumString(arguments, "action", {"start", "stop"}, "trace_record");
+
+        nlohmann::json params = {{"action", action}};
+        std::string path;
+        if (action == "start")
+        {
+            if (!arguments.contains("path") || !arguments["path"].is_string())
+                throw ToolError("trace_record: 'start' requires 'path' to be a string");
+            path = arguments["path"].get<std::string>();
+            params["path"] = path;
+        }
+
+        ToolResult result;
+        result.structuredContent = link->Call("trace.record", params);
+        result.text = FormatTraceRecordResult(action, path);
+        return result;
+    };
+    registry.Add(std::move(traceRecord));
+
+    Tool runToUserCode;
+    runToUserCode.name = "run_to_user_code";
+    runToUserCode.description =
+        "Resume execution until control reaches code belonging to the "
+        "debugged program itself, rather than a system library. WHY "
+        "THIS MATTERS: after a call into a system function, or while a "
+        "packer's unpacking stub runs library code, this returns to the "
+        "interesting part in one step instead of stepping through the "
+        "library by hand. It works by setting temporary memory "
+        "breakpoints on the pages that hold user code, rather than "
+        "single-stepping instruction by instruction, so it is fast even "
+        "across long stretches of system code. Requires a debugging "
+        "session that is running or paused inside system code for the "
+        "call to be meaningful; x64dbg refuses to start a second such "
+        "run while one is already in progress. Returns the same shape "
+        "as the step tools: 'paused', 'timed_out', 'pause_reason', and "
+        "'status'. If it times out, 'timed_out' is true and the process "
+        "is still running. Parameters: 'timeout_ms' — maximum time to "
+        "wait, in milliseconds; if omitted, the plugin's default timeout "
+        "is used.";
+    runToUserCode.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"timeout_ms", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Maximum time to wait for user code to be reached, in "
+                 "milliseconds. If omitted, the plugin's default timeout is used."}
+            }}
+        }},
+        {"additionalProperties", false}
+    };
+    runToUserCode.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("run_to_user_code: plugin link is not configured");
+
+        nlohmann::json params = nlohmann::json::object();
+        if (arguments.contains("timeout_ms"))
+        {
+            RequireNonNegativeInteger(arguments, "timeout_ms", "run_to_user_code");
+            params["timeout_ms"] = arguments["timeout_ms"].get<long long>();
+        }
+
+        ToolResult result;
+        result.structuredContent = link->Call("trace.run_to_user_code", params, RequestTimeoutMs(params));
+        result.text = FormatPauseResult(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(runToUserCode));
+
+    Tool codeCoverage;
+    codeCoverage.name = "code_coverage";
+    codeCoverage.description =
+        "Record which addresses in the debuggee were executed and how "
+        "many times, then read the counts back. 'enable' turns on "
+        "recording for the memory page containing 'address'; 'disable' "
+        "turns it off for that page; 'read' returns the recorded hit "
+        "counts for the range ['start', 'start' + 'size']. Usage: "
+        "enable coverage for a region, run or trace the program, then "
+        "read it. WHY THIS MATTERS for unpacking and virtualised code: "
+        "addresses that turn out to have been executed but are not "
+        "recognized as code reveal where the real code lives after "
+        "unpacking, and hit counts expose the dispatch loop of a "
+        "virtual machine — the handler dispatcher is the address with "
+        "by far the most hits, since it runs once per virtual "
+        "instruction. 'granularity' controls what is recorded per byte: "
+        "'bit' only records whether a byte was executed at all; 'byte' "
+        "and 'word' also keep a hit counter, which is what makes a "
+        "dispatch loop visible — 'byte' is the default and the right "
+        "choice unless memory for the coverage map is a concern. LIMIT: "
+        "coverage is tracked per memory PAGE, so enabling it for one "
+        "address enables it for the whole page that contains it. "
+        "'read' is limited in range and in the number of entries it "
+        "returns; the result says when it was truncated, and addresses "
+        "that were never executed are omitted entirely. Parameters: "
+        "'action' — 'enable', 'disable', or 'read'; 'address' — address "
+        "inside the page to toggle, required for 'enable' and "
+        "'disable'; 'granularity' — 'bit', 'byte', or 'word', used only "
+        "by 'enable', defaults to 'byte'; 'start' and 'size' — range to "
+        "read, both required for 'read'.";
+    codeCoverage.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"action", {
+                {"type", "string"},
+                {"enum", nlohmann::json::array({"enable", "disable", "read"})},
+                {"description",
+                 "'enable' turns coverage on for a page, 'disable' turns it off, "
+                 "'read' returns recorded hit counts for a range."}
+            }},
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Address inside the page to toggle coverage for, given as a "
+                 "number (not a hex string). Required for 'enable' and 'disable'."}
+            }},
+            {"granularity", {
+                {"type", "string"},
+                {"enum", nlohmann::json::array({"bit", "byte", "word"})},
+                {"default", "byte"},
+                {"description",
+                 "'bit' only records whether a byte was executed; 'byte' and "
+                 "'word' also keep a hit counter, which is what reveals a virtual "
+                 "machine's dispatch loop. Used only by 'enable', defaults to 'byte'."}
+            }},
+            {"start", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Start address of the range to read coverage for. Required for 'read'."}
+            }},
+            {"size", {
+                {"type", "integer"},
+                {"minimum", 1},
+                {"description", "Size in bytes of the range to read coverage for. Required for 'read'."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"action"})},
+        {"allOf", nlohmann::json::array({
+            {
+                {"if", {
+                    {"properties", {{"action", {{"const", "enable"}}}}},
+                    {"required", nlohmann::json::array({"action"})}
+                }},
+                {"then", {{"required", nlohmann::json::array({"action", "address"})}}}
+            },
+            {
+                {"if", {
+                    {"properties", {{"action", {{"const", "disable"}}}}},
+                    {"required", nlohmann::json::array({"action"})}
+                }},
+                {"then", {{"required", nlohmann::json::array({"action", "address"})}}}
+            },
+            {
+                {"if", {
+                    {"properties", {{"action", {{"const", "read"}}}}},
+                    {"required", nlohmann::json::array({"action"})}
+                }},
+                {"then", {{"required", nlohmann::json::array({"action", "start", "size"})}}}
+            }
+        })},
+        {"additionalProperties", false}
+    };
+    codeCoverage.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("code_coverage: plugin link is not configured");
+
+        const std::string action =
+            RequireEnumString(arguments, "action", {"enable", "disable", "read"}, "code_coverage");
+
+        ToolResult result;
+        if (action == "enable" || action == "disable")
+        {
+            RequireNonNegativeInteger(arguments, "address", "code_coverage");
+            const std::uint64_t address = arguments["address"].get<std::uint64_t>();
+
+            nlohmann::json params = {{"address", address}};
+            std::string granularity = "byte";
+            if (action == "enable")
+            {
+                if (arguments.contains("granularity"))
+                    granularity = RequireEnumString(arguments, "granularity", {"bit", "byte", "word"}, "code_coverage");
+                params["granularity"] = granularity;
+            }
+
+            result.structuredContent = link->Call(action == "enable" ? "coverage.enable" : "coverage.disable", params);
+            result.text = FormatCoverageToggleResult(action, address, granularity);
+        }
+        else
+        {
+            RequireNonNegativeInteger(arguments, "start", "code_coverage");
+            if (!arguments.contains("size") || !arguments["size"].is_number_integer() ||
+                arguments["size"].get<long long>() < 1)
+                throw ToolError("code_coverage: 'size' must be a positive integer");
+            const std::uint64_t start = arguments["start"].get<std::uint64_t>();
+            const long long size = arguments["size"].get<long long>();
+
+            result.structuredContent = link->Call("coverage.read", {
+                {"start", start},
+                {"size", size}
+            }, kSlowToolRequestTimeoutMs);
+            result.text = FormatCoverageRead(result.structuredContent);
+        }
+        return result;
+    };
+    registry.Add(std::move(codeCoverage));
 }
 
 } // namespace x64dbg_mcp::bridge

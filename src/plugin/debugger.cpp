@@ -288,6 +288,30 @@ std::string XrefTypeToString(XREFTYPE type)
     }
 }
 
+std::string TraceRecordByteTypeToString(TRACERECORDBYTETYPE type)
+{
+    switch (type)
+    {
+    case InstructionBody: return "instructionBody";
+    case InstructionHeading: return "instructionHeading";
+    case InstructionTailing: return "instructionTailing";
+    case InstructionOverlapped: return "instructionOverlapped";
+    case DataByte: return "dataByte";
+    case DataWord: return "dataWord";
+    case DataDWord: return "dataDWord";
+    case DataQWord: return "dataQWord";
+    case DataFloat: return "dataFloat";
+    case DataDouble: return "dataDouble";
+    case DataLongDouble: return "dataLongDouble";
+    case DataXMM: return "dataXMM";
+    case DataYMM: return "dataYMM";
+    case DataMMX: return "dataMMX";
+    case DataMixed: return "dataMixed";
+    case InstructionDataMixed: return "instructionDataMixed";
+    default: return "unknown";
+    }
+}
+
 // State of log capture. Unlike everything else in this file, this is NOT
 // accessed only from the DebuggerWorker worker thread: StartLogCapture runs
 // directly on the GUI thread (see McpService::EnableLogCapture), while
@@ -2327,6 +2351,242 @@ bool SetPageProtection(unsigned long long address, const std::string& rights, st
     catch (...)
     {
         error = "Internal error while setting page protection";
+        return false;
+    }
+}
+
+bool TraceUntil(const std::string& mode, const std::string& condition, int maxSteps,
+                int timeoutMs, ControlResult& out, std::string& error)
+{
+    out = ControlResult{};
+    try
+    {
+        if (!RequirePaused("tracing", error))
+            return false;
+        if (mode != "into" && mode != "over")
+        {
+            error = "Unknown trace mode \"" + mode + "\": expected one of into, over";
+            return false;
+        }
+        if (condition.empty())
+        {
+            error = "Parameter \"condition\" must not be empty";
+            return false;
+        }
+        if (maxSteps < kMinTraceSteps || maxSteps > kMaxTraceSteps)
+        {
+            error = "Parameter \"max_steps\" must be between 1 and 10000000";
+            return false;
+        }
+
+        const int clampedTimeout = ClampTimeout(timeoutMs);
+        auto& tracker = McpService::Instance().Tracker();
+
+        const std::string cmdName = (mode == "into") ? "TraceIntoConditional" : "TraceOverConditional";
+        const std::string cmd = cmdName + " " + condition + ", " + std::to_string(maxSteps);
+
+        const auto before = tracker.Current().generation;
+        DbgCmdExec(cmd.c_str());
+        return FinishWithWait(tracker, before, true, clampedTimeout, out);
+    }
+    catch (...)
+    {
+        error = "Internal error while tracing";
+        return false;
+    }
+}
+
+bool TraceRecordToFile(bool start, const std::string& filePath, std::string& error)
+{
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        if (start)
+        {
+            if (filePath.empty())
+            {
+                error = "Parameter \"path\" must not be empty";
+                return false;
+            }
+            // This only opens the trace file; no instructions are stored
+            // until a trace command (e.g. TraceIntoConditional/TraceOverConditional
+            // via TraceUntil) actually executes while recording is active.
+            const std::string cmd = "StartRunTrace \"" + filePath + "\"";
+            if (!DbgCmdExecDirect(cmd.c_str()))
+            {
+                error = "Failed to start trace recording to \"" + filePath + "\"";
+                return false;
+            }
+        }
+        else if (!DbgCmdExecDirect("StopRunTrace"))
+        {
+            error = "Failed to stop trace recording";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while controlling trace recording";
+        return false;
+    }
+}
+
+bool RunToUserCode(int timeoutMs, ControlResult& out, std::string& error)
+{
+    out = ControlResult{};
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        const int clampedTimeout = ClampTimeout(timeoutMs);
+        auto& tracker = McpService::Instance().Tracker();
+
+        const auto before = tracker.Current().generation;
+        if (!DbgCmdExec("RunToUserCode"))
+        {
+            error = "The debugger rejected \"RunToUserCode\": it fails if another such command is already running";
+            return false;
+        }
+        return FinishWithWait(tracker, before, true, clampedTimeout, out);
+    }
+    catch (...)
+    {
+        error = "Internal error while running to user code";
+        return false;
+    }
+}
+
+bool EnableCoverage(unsigned long long address, const std::string& granularity, std::string& error)
+{
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->SetTraceRecordType)
+        {
+            error = "Trace record coverage is not supported by this x64dbg build";
+            return false;
+        }
+
+        TRACERECORDTYPE type;
+        if (granularity == "bit")
+            type = TraceRecordBitExec;
+        else if (granularity == "byte")
+            type = TraceRecordByteWithExecTypeAndCounter;
+        else if (granularity == "word")
+            type = TraceRecordWordWithExecTypeAndCounter;
+        else
+        {
+            error = "Unknown coverage granularity \"" + granularity + "\": expected one of bit, byte, word";
+            return false;
+        }
+
+        // Trace record state is tracked per memory PAGE: this enables
+        // coverage for the whole page containing address, not just the
+        // single address given.
+        if (!functions->SetTraceRecordType(static_cast<duint>(address), type))
+        {
+            error = "Failed to enable coverage tracking for the page containing the given address";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while enabling coverage";
+        return false;
+    }
+}
+
+bool DisableCoverage(unsigned long long address, std::string& error)
+{
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->SetTraceRecordType)
+        {
+            error = "Trace record coverage is not supported by this x64dbg build";
+            return false;
+        }
+
+        if (!functions->SetTraceRecordType(static_cast<duint>(address), TraceRecordNone))
+        {
+            error = "Failed to disable coverage tracking for the page containing the given address";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while disabling coverage";
+        return false;
+    }
+}
+
+bool ReadCoverage(unsigned long long start, unsigned long long size,
+                  std::vector<CoverageEntry>& out, bool& truncated, std::string& error)
+{
+    out.clear();
+    truncated = false;
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->GetTraceRecordHitCount || !functions->GetTraceRecordByteType)
+        {
+            error = "Trace record coverage is not supported by this x64dbg build";
+            return false;
+        }
+
+        if (size == 0)
+        {
+            error = "Parameter \"size\" must be greater than zero";
+            return false;
+        }
+        if (size > kMaxCoverageRangeSize)
+        {
+            error = "Requested coverage range exceeds the maximum of 16 MiB";
+            return false;
+        }
+
+        const duint rangeStart = static_cast<duint>(start);
+        const duint rangeEnd = static_cast<duint>(start + size);
+        for (duint addr = rangeStart; addr < rangeEnd; ++addr)
+        {
+            const unsigned int hits = functions->GetTraceRecordHitCount(addr);
+            if (hits == 0)
+                continue;
+
+            if (out.size() >= kMaxCoverageEntries)
+            {
+                truncated = true;
+                break;
+            }
+
+            CoverageEntry entry;
+            entry.address = static_cast<unsigned long long>(addr);
+            entry.hitCount = hits;
+            entry.byteType = TraceRecordByteTypeToString(functions->GetTraceRecordByteType(addr));
+            out.push_back(std::move(entry));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        truncated = false;
+        error = "Internal error while reading coverage";
         return false;
     }
 }
