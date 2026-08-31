@@ -767,6 +767,116 @@ std::string FormatLogLines(const nlohmann::json& result)
     return out.str();
 }
 
+// Human-readable summary of memory.write: how many bytes were written,
+// where, and whether the write was recorded as an undoable patch.
+std::string FormatWriteMemoryResult(const nlohmann::json& result)
+{
+    const std::uint64_t address = result.value("address", 0ULL);
+    const std::uint64_t size = result.value("size", 0ULL);
+    const bool recordedAsPatch = result.value("recordedAsPatch", false);
+
+    std::ostringstream out;
+    out << "Wrote " << std::dec << size << " byte" << (size == 1 ? "" : "s")
+        << " at 0x" << std::hex << address << ". "
+        << (recordedAsPatch ? "Recorded as a patch." : "Not recorded as a patch.");
+    return out.str();
+}
+
+// Human-readable summary of register.set: the register name and its new
+// value in hex and decimal.
+std::string FormatSetRegisterResult(const nlohmann::json& result)
+{
+    const std::string name = result.value("name", std::string());
+    const std::uint64_t value = result.value("value", 0ULL);
+
+    std::ostringstream out;
+    out << name << " = 0x" << std::hex << value << std::dec << " (" << value << ")";
+    return out.str();
+}
+
+// Human-readable summary of assemble: the address, the instruction as
+// given, and the resulting size in bytes.
+std::string FormatAssembleResult(const nlohmann::json& result, const std::string& instruction)
+{
+    const std::uint64_t address = result.value("address", 0ULL);
+    const std::uint64_t size = result.value("size", 0ULL);
+
+    std::ostringstream out;
+    out << "Assembled '" << instruction << "' at 0x" << std::hex << address << std::dec
+        << " (" << size << " byte" << (size == 1 ? "" : "s") << ").";
+    return out.str();
+}
+
+// Table of recorded patches: address, original byte, current byte,
+// module; says plainly if there are none, rather than showing an empty table.
+std::string FormatPatchesList(const nlohmann::json& patches)
+{
+    if (patches.empty())
+        return "No patches are currently recorded.\n";
+
+    std::ostringstream out;
+    out << std::left
+        << std::setw(18) << "Address"
+        << std::setw(8) << "Old"
+        << std::setw(8) << "New"
+        << "Module" << '\n';
+
+    for (const auto& patch : patches)
+    {
+        const std::uint64_t address = patch.value("address", 0ULL);
+        const unsigned int oldByte = patch.value("oldByte", 0u);
+        const unsigned int newByte = patch.value("newByte", 0u);
+        const std::string module = patch.value("module", std::string());
+
+        std::ostringstream addressText, oldText, newText;
+        addressText << "0x" << std::hex << address;
+        oldText << "0x" << std::hex << std::setw(2) << std::setfill('0') << oldByte;
+        newText << "0x" << std::hex << std::setw(2) << std::setfill('0') << newByte;
+
+        out << std::left
+            << std::setw(18) << addressText.str()
+            << std::setw(8) << oldText.str()
+            << std::setw(8) << newText.str()
+            << module << '\n';
+    }
+    out << patches.size() << " patch" << (patches.size() == 1 ? "" : "es") << ".\n";
+    return out.str();
+}
+
+// Human-readable summary of patches.restore: how many patches were restored.
+std::string FormatPatchesRestore(const nlohmann::json& result)
+{
+    const long long restored = result.value("restored", 0LL);
+
+    std::ostringstream out;
+    out << restored << " patch" << (restored == 1 ? "" : "es") << " restored.";
+    return out.str();
+}
+
+// Human-readable summary of patches.apply_to_file: how many patches were
+// written, and to which file. Does not change the running process.
+std::string FormatPatchesApplyToFile(const nlohmann::json& result)
+{
+    const long long patched = result.value("patched", 0LL);
+    const std::string path = result.value("path", std::string());
+
+    std::ostringstream out;
+    out << patched << " patch" << (patched == 1 ? "" : "es") << " written to " << path << ".";
+    return out.str();
+}
+
+// Human-readable summary of memory.set_rights: the address and the
+// rights that were applied.
+std::string FormatSetPageRightsResult(const nlohmann::json& result)
+{
+    const std::uint64_t address = result.value("address", 0ULL);
+    const std::string rights = result.value("rights", std::string());
+
+    std::ostringstream out;
+    out << "Set rights of 0x" << std::hex << address << std::dec << " to '" << rights << "'.";
+    return out.str();
+}
+
 } // namespace
 
 void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> link)
@@ -2253,6 +2363,387 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(readLog));
+
+    Tool writeMemory;
+    writeMemory.name = "write_memory";
+    writeMemory.description =
+        "Write raw bytes into the memory of the debugged process. SAFETY: "
+        "this modifies the running program directly and can crash it, "
+        "corrupt its data structures, or make it behave unpredictably — "
+        "use it deliberately, not experimentally. Give the bytes to write "
+        "as a hex string in 'data', e.g. '90 90' or '9090' (spaces are "
+        "optional). By default the write is recorded as a patch (see the "
+        "'patches' tool), which makes it undoable and lets it later be "
+        "saved into a copy of the file on disk; set 'record_patch' to "
+        "false to write without recording. Use this tool to change a "
+        "value a program is about to read, to disable a check, or to "
+        "fill code with NOPs. Requires the process to be paused: writing "
+        "while it runs is refused, because the target could be executing "
+        "the very bytes being overwritten halfway through the write. "
+        "Parameters: 'address' — a non-negative integer giving the "
+        "address to write to (a number, not a hex string); 'data' — the "
+        "bytes to write, as a hex string; 'record_patch' — whether to "
+        "record the write as a patch, true by default.";
+    writeMemory.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description", "Address to write to, given as a number (not a hex string)."}
+            }},
+            {"data", {
+                {"type", "string"},
+                {"description", "Bytes to write, as a hex string, e.g. '90 90' or '9090'. Spaces are optional."}
+            }},
+            {"record_patch", {
+                {"type", "boolean"},
+                {"default", true},
+                {"description",
+                 "Whether to record the write as an undoable patch, manageable with "
+                 "the 'patches' tool. Defaults to true."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"address", "data"})},
+        {"additionalProperties", false}
+    };
+    writeMemory.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("write_memory: plugin link is not configured");
+
+        RequireNonNegativeInteger(arguments, "address", "write_memory");
+        if (!arguments.contains("data") || !arguments["data"].is_string())
+            throw ToolError("write_memory: 'data' is required and must be a hex string");
+        const std::uint64_t address = arguments["address"].get<std::uint64_t>();
+        const std::string data = arguments["data"].get<std::string>();
+        const bool recordPatch = arguments.value("record_patch", true);
+
+        ToolResult result;
+        result.structuredContent = link->Call("memory.write", {
+            {"address", address},
+            {"data", data},
+            {"record_patch", recordPatch}
+        });
+        result.text = FormatWriteMemoryResult(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(writeMemory));
+
+    Tool setRegister;
+    setRegister.name = "set_register";
+    setRegister.description =
+        "Set a register, or any debugger variable, by name to a given "
+        "value. SAFETY: setting the instruction pointer (rip/eip) to an "
+        "arbitrary address usually crashes the process — use this tool "
+        "deliberately, not experimentally. Names are the usual ones for "
+        "the debuggee's architecture: 'rax', 'rip', 'rsp', and similar on "
+        "64-bit; 'eax', 'eip', 'esp', and similar on 32-bit. Use it to "
+        "force a branch by changing a flag or a compared value, to "
+        "redirect execution by setting the instruction pointer, or to "
+        "fix an argument before a call. Requires the process to be "
+        "paused; the change applies to the current thread. Parameters: "
+        "'name' — the register or variable name; 'value' — the value to "
+        "set it to, as a number.";
+    setRegister.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"name", {
+                {"type", "string"},
+                {"description", "Register or debugger variable name, e.g. 'rax', 'rip', 'rsp', 'eax'."}
+            }},
+            {"value", {
+                {"type", "integer"},
+                {"description", "Value to set the register or variable to."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"name", "value"})},
+        {"additionalProperties", false}
+    };
+    setRegister.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("set_register: plugin link is not configured");
+
+        if (!arguments.contains("name") || !arguments["name"].is_string())
+            throw ToolError("set_register: 'name' is required and must be a string");
+        if (!arguments.contains("value") || !arguments["value"].is_number_integer())
+            throw ToolError("set_register: 'value' is required and must be an integer");
+        const std::string name = arguments["name"].get<std::string>();
+        const long long value = arguments["value"].get<long long>();
+
+        ToolResult result;
+        result.structuredContent = link->Call("register.set", {
+            {"name", name},
+            {"value", value}
+        });
+        result.text = FormatSetRegisterResult(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(setRegister));
+
+    Tool assembleAt;
+    assembleAt.name = "assemble_at";
+    assembleAt.description =
+        "Assemble one instruction and write it at the given address. "
+        "SAFETY: this changes code that is about to run, the same as "
+        "writing memory directly — use it deliberately, not "
+        "experimentally. Give the instruction in the debugger's assembly "
+        "syntax, for example 'nop', 'jmp 0x140001000', or 'mov eax, 1'. A "
+        "shorter instruction leaves behind leftover bytes of the one it "
+        "replaced, which would otherwise be decoded as garbage; "
+        "'fill_nop', true by default, pads those leftover bytes with "
+        "NOPs so the surrounding code stream stays valid — it should "
+        "normally stay on. Use this tool to turn a conditional jump into "
+        "its opposite or into NOPs, to redirect a call, or to insert a "
+        "breakpoint-like instruction. Requires the process to be paused. "
+        "If the given text cannot be assembled, the tool fails with the "
+        "assembler's own message, which says exactly what is wrong. "
+        "Parameters: 'address' — a non-negative integer giving the "
+        "address to assemble at (a number, not a hex string); "
+        "'instruction' — the instruction text; 'fill_nop' — whether to "
+        "pad leftover bytes with NOPs, true by default.";
+    assembleAt.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description", "Address to assemble the instruction at, given as a number (not a hex string)."}
+            }},
+            {"instruction", {
+                {"type", "string"},
+                {"description", "Instruction text in the debugger's assembly syntax, e.g. 'jmp 0x140001000'."}
+            }},
+            {"fill_nop", {
+                {"type", "boolean"},
+                {"default", true},
+                {"description",
+                 "Whether to pad leftover bytes of a shorter replacement instruction "
+                 "with NOPs, keeping the code stream valid. Defaults to true; should "
+                 "normally stay on."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"address", "instruction"})},
+        {"additionalProperties", false}
+    };
+    assembleAt.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("assemble_at: plugin link is not configured");
+
+        RequireNonNegativeInteger(arguments, "address", "assemble_at");
+        if (!arguments.contains("instruction") || !arguments["instruction"].is_string())
+            throw ToolError("assemble_at: 'instruction' is required and must be a string");
+        const std::uint64_t address = arguments["address"].get<std::uint64_t>();
+        const std::string instruction = arguments["instruction"].get<std::string>();
+        const bool fillNop = arguments.value("fill_nop", true);
+
+        ToolResult result;
+        result.structuredContent = link->Call("assemble", {
+            {"address", address},
+            {"instruction", instruction},
+            {"fill_nop", fillNop}
+        });
+        result.text = FormatAssembleResult(result.structuredContent, instruction);
+        return result;
+    };
+    registry.Add(std::move(assembleAt));
+
+    Tool patches;
+    patches.name = "patches";
+    patches.description =
+        "Manage recorded patches — writes made with write_memory or "
+        "assemble_at while recording was enabled (the default). 'list' "
+        "shows every patch with its address, original byte, and current "
+        "byte. 'restore' puts the original bytes back, either at a "
+        "single 'address' or across a range given by 'start' and 'end' "
+        "together. 'apply_to_file' writes every current patch into a "
+        "copy of the module on disk at 'path'; it does NOT change the "
+        "running process, it produces a patched file — this is how a fix "
+        "is made permanent. Use this tool to review what has been "
+        "changed, to undo an experiment, or to save a working patch. "
+        "Limitation: only writes recorded as patches appear here; a "
+        "write made with 'record_patch' set to false is invisible to it. "
+        "Parameters: 'action' — 'list', 'restore', or 'apply_to_file'; "
+        "'address' — single address to restore (for 'restore', mutually "
+        "exclusive with 'start'/'end'); 'start' and 'end' — range of "
+        "addresses to restore (for 'restore', used together); 'path' — "
+        "destination file path (required for 'apply_to_file').";
+    patches.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"action", {
+                {"type", "string"},
+                {"enum", nlohmann::json::array({"list", "restore", "apply_to_file"})},
+                {"description",
+                 "'list' shows recorded patches, 'restore' reverts them, "
+                 "'apply_to_file' writes them into a copy of the module on disk."}
+            }},
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Address of a single patch to restore, given as a number (not a "
+                 "hex string). Used with 'restore'; mutually exclusive with "
+                 "'start'/'end'."}
+            }},
+            {"start", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Start address of a range of patches to restore. Used together "
+                 "with 'end', for 'restore'."}
+            }},
+            {"end", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "End address of a range of patches to restore. Used together "
+                 "with 'start', for 'restore'."}
+            }},
+            {"path", {
+                {"type", "string"},
+                {"description",
+                 "Destination path for the patched copy of the module. Required "
+                 "for 'apply_to_file'."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"action"})},
+        {"allOf", nlohmann::json::array({
+            {
+                {"if", {
+                    {"properties", {{"action", {{"const", "apply_to_file"}}}}},
+                    {"required", nlohmann::json::array({"action"})}
+                }},
+                {"then", {{"required", nlohmann::json::array({"action", "path"})}}}
+            }
+        })},
+        {"additionalProperties", false}
+    };
+    patches.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("patches: plugin link is not configured");
+
+        const std::string action =
+            RequireEnumString(arguments, "action", {"list", "restore", "apply_to_file"}, "patches");
+
+        ToolResult result;
+        if (action == "list")
+        {
+            result.structuredContent = link->Call("patches.list", nlohmann::json::object());
+            const nlohmann::json list = result.structuredContent.value("patches", nlohmann::json::array());
+            result.text = FormatPatchesList(list);
+        }
+        else if (action == "restore")
+        {
+            const bool hasAddress = arguments.contains("address");
+            const bool hasStart = arguments.contains("start");
+            const bool hasEnd = arguments.contains("end");
+            if (hasAddress && (hasStart || hasEnd))
+                throw ToolError("patches: 'address' cannot be combined with 'start'/'end'");
+            if (!hasAddress && !(hasStart && hasEnd))
+                throw ToolError("patches: 'restore' requires either 'address', or 'start' and 'end' together");
+
+            nlohmann::json params = nlohmann::json::object();
+            if (hasAddress)
+            {
+                RequireNonNegativeInteger(arguments, "address", "patches");
+                params["address"] = arguments["address"].get<std::uint64_t>();
+            }
+            else
+            {
+                RequireNonNegativeInteger(arguments, "start", "patches");
+                RequireNonNegativeInteger(arguments, "end", "patches");
+                params["start"] = arguments["start"].get<std::uint64_t>();
+                params["end"] = arguments["end"].get<std::uint64_t>();
+            }
+
+            result.structuredContent = link->Call("patches.restore", params);
+            result.text = FormatPatchesRestore(result.structuredContent);
+        }
+        else
+        {
+            if (!arguments.contains("path") || !arguments["path"].is_string())
+                throw ToolError("patches: 'apply_to_file' requires 'path' to be a string");
+            const std::string path = arguments["path"].get<std::string>();
+
+            result.structuredContent = link->Call("patches.apply_to_file", {
+                {"path", path}
+            });
+            result.text = FormatPatchesApplyToFile(result.structuredContent);
+        }
+        return result;
+    };
+    registry.Add(std::move(patches));
+
+    Tool setPageRights;
+    setPageRights.name = "set_page_rights";
+    setPageRights.description =
+        "Change the memory protection of the region containing an "
+        "address. SAFETY: relaxing protection can mask bugs in the "
+        "debuggee and change its behaviour — use it deliberately, not "
+        "experimentally. The 'rights' string uses full-word names: "
+        "'Execute', 'ExecuteRead', 'ExecuteReadWrite', "
+        "'ExecuteWriteCopy', 'NoAccess', 'ReadOnly', 'ReadWrite', "
+        "'WriteCopy' — optionally prefixed with 'G' for a guard page "
+        "(e.g. 'GExecuteRead'). This is NOT the compact form (e.g. "
+        "'ERWC') that the memory_map tool displays; that form is "
+        "display-only and will be rejected here. Use it to make a "
+        "read-only region writable before patching it, or to make data "
+        "executable when analysing generated code. Requires the process "
+        "to be paused; the change applies to the whole memory region, "
+        "not a single byte. Parameters: 'address' — a non-negative "
+        "integer giving an address inside the region (a number, not a "
+        "hex string); 'rights' — the protection to apply, as a string.";
+    setPageRights.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description", "Address inside the region to change, given as a number (not a hex string)."}
+            }},
+            {"rights", {
+                {"type", "string"},
+                {"description",
+                 "Protection to apply, as a full-word name: 'Execute', "
+                 "'ExecuteRead', 'ExecuteReadWrite', 'ExecuteWriteCopy', "
+                 "'NoAccess', 'ReadOnly', 'ReadWrite', 'WriteCopy' — optionally "
+                 "prefixed with 'G' for a guard page. NOT the compact form "
+                 "(e.g. 'ERWC') shown by memory_map; that display form is "
+                 "rejected here."}
+            }}
+        }},
+        {"required", nlohmann::json::array({"address", "rights"})},
+        {"additionalProperties", false}
+    };
+    setPageRights.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("set_page_rights: plugin link is not configured");
+
+        RequireNonNegativeInteger(arguments, "address", "set_page_rights");
+        if (!arguments.contains("rights") || !arguments["rights"].is_string())
+            throw ToolError("set_page_rights: 'rights' is required and must be a string");
+        const std::uint64_t address = arguments["address"].get<std::uint64_t>();
+        const std::string rights = arguments["rights"].get<std::string>();
+
+        ToolResult result;
+        result.structuredContent = link->Call("memory.set_rights", {
+            {"address", address},
+            {"rights", rights}
+        });
+        result.text = FormatSetPageRightsResult(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(setPageRights));
 }
 
 } // namespace x64dbg_mcp::bridge

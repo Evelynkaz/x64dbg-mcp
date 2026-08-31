@@ -50,6 +50,53 @@ std::string BytesToHex(const std::vector<unsigned char>& bytes)
     return hex;
 }
 
+// Parses a hex byte string tolerant of spaces between bytes, e.g. "90 90"
+// or "9090". Rejects anything left over after removing spaces that is not
+// an even number of hex digits.
+bool BytesFromHex(const std::string& text, std::vector<unsigned char>& out, std::string& error)
+{
+    out.clear();
+    std::string compact;
+    compact.reserve(text.size());
+    for (char ch : text)
+    {
+        if (ch != ' ')
+            compact.push_back(ch);
+    }
+
+    static const std::string kFormatError =
+        "Parameter \"data\" must be a hex byte string with an even number of hex digits, "
+        "spaces between bytes allowed, e.g. \"90 90\" or \"9090\"";
+    if (compact.empty() || compact.size() % 2 != 0)
+    {
+        error = kFormatError;
+        return false;
+    }
+
+    auto hexValue = [](char ch) -> int
+    {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        return -1;
+    };
+
+    out.reserve(compact.size() / 2);
+    for (size_t i = 0; i < compact.size(); i += 2)
+    {
+        const int hi = hexValue(compact[i]);
+        const int lo = hexValue(compact[i + 1]);
+        if (hi < 0 || lo < 0)
+        {
+            out.clear();
+            error = kFormatError;
+            return false;
+        }
+        out.push_back(static_cast<unsigned char>((hi << 4) | lo));
+    }
+    return true;
+}
+
 std::string BuildErrorResponse(const nlohmann::json& id, ipc::ErrorCode code, const std::string& message)
 {
     nlohmann::json response;
@@ -1223,6 +1270,264 @@ std::string HandleLogRead(DebuggerWorker& worker, const nlohmann::json& id, cons
     return BuildOkResponse(id, result);
 }
 
+// Shared result of a write/patch operation that carries no data of its own,
+// just success or failure.
+struct WriteOutcome
+{
+    bool ok = false;
+    std::string error;
+};
+
+std::string HandleMemoryWrite(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    std::string dataHex;
+    if (!GetRequiredStringParam(params, "data", dataHex, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    std::vector<unsigned char> data;
+    if (!BytesFromHex(dataHex, data, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    bool recordPatch = true;
+    if (!GetOptionalBoolParam(params, "record_patch", true, recordPatch, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<WriteOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address, data, recordPatch]
+        { outcome->ok = WriteMemory(address, data, recordPatch, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["address"] = address;
+    result["size"] = data.size();
+    result["recordedAsPatch"] = recordPatch;
+    return BuildOkResponse(id, result);
+}
+
+std::string HandleRegisterSet(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string name;
+    std::string paramError;
+    if (!GetRequiredStringParam(params, "name", name, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    unsigned long long value = 0;
+    if (!GetUint64Param(params, "value", value, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<WriteOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, name, value] { outcome->ok = SetNamedValue(name, value, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["name"] = name;
+    result["value"] = value;
+    return BuildOkResponse(id, result);
+}
+
+struct AssembleOutcome
+{
+    bool ok = false;
+    AssembleResult result;
+    std::string error;
+};
+
+std::string HandleAssemble(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    std::string instruction;
+    if (!GetRequiredStringParam(params, "instruction", instruction, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    bool fillNop = true;
+    if (!GetOptionalBoolParam(params, "fill_nop", true, fillNop, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<AssembleOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address, instruction, fillNop]
+        { outcome->ok = AssembleAt(address, instruction, fillNop, outcome->result, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["address"] = address;
+    result["size"] = outcome->result.size;
+    return BuildOkResponse(id, result);
+}
+
+struct ListPatchesOutcome
+{
+    bool ok = false;
+    std::vector<PatchEntry> patches;
+    std::string error;
+};
+
+std::string HandlePatchesList(DebuggerWorker& worker, const nlohmann::json& id)
+{
+    auto outcome = std::make_shared<ListPatchesOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome] { outcome->ok = ListPatches(outcome->patches, outcome->error); }, kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json list = nlohmann::json::array();
+    for (const auto& patch : outcome->patches)
+    {
+        nlohmann::json item;
+        item["address"] = patch.address;
+        item["oldByte"] = patch.oldByte;
+        item["newByte"] = patch.newByte;
+        item["module"] = patch.module;
+        list.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["patches"] = list;
+    return BuildOkResponse(id, result);
+}
+
+struct RestorePatchesOutcome
+{
+    bool ok = false;
+    size_t restored = 0;
+    std::string error;
+};
+
+std::string HandlePatchesRestore(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    const bool hasAddress = params.is_object() && params.contains("address");
+    const bool hasRange = params.is_object() && params.contains("start") && params.contains("end");
+    if (hasAddress == hasRange)
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument,
+            "Provide either parameter \"address\" or both \"start\" and \"end\", but not both");
+
+    std::string paramError;
+    unsigned long long address = 0, end = 0;
+    if (hasAddress)
+    {
+        if (!GetUint64Param(params, "address", address, paramError))
+            return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+    }
+    else if (!GetUint64Param(params, "start", address, paramError) ||
+             !GetUint64Param(params, "end", end, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<RestorePatchesOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address, end, hasRange]
+        { outcome->ok = RestorePatches(address, end, hasRange, outcome->restored, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["restored"] = outcome->restored;
+    return BuildOkResponse(id, result);
+}
+
+struct ApplyPatchesOutcome
+{
+    bool ok = false;
+    int patched = 0;
+    std::string error;
+};
+
+std::string HandlePatchesApplyToFile(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string path;
+    std::string paramError;
+    if (!GetRequiredStringParam(params, "path", path, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<ApplyPatchesOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, path] { outcome->ok = ApplyPatchesToFile(path, outcome->patched, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["patched"] = outcome->patched;
+    result["path"] = path;
+    return BuildOkResponse(id, result);
+}
+
+std::string HandleMemorySetRights(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    std::string rights;
+    if (!GetRequiredStringParam(params, "rights", rights, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<WriteOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address, rights] { outcome->ok = SetPageProtection(address, rights, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["address"] = address;
+    result["rights"] = rights;
+    return BuildOkResponse(id, result);
+}
+
 // Debug state callbacks. Run on x64dbg's own debugger threads, so they must
 // be as short as possible and never throw: DebugStateTracker itself never throws.
 void CbInitDebug(CBTYPE, void*) { McpService::Instance().Tracker().NotifyDebugStarted(); }
@@ -1402,6 +1707,20 @@ std::string McpService::HandleRequest(const std::string& request)
         return HandleScriptRun(worker_, id, params);
     if (method == "log.read")
         return HandleLogRead(worker_, id, params);
+    if (method == "memory.write")
+        return HandleMemoryWrite(worker_, id, params);
+    if (method == "register.set")
+        return HandleRegisterSet(worker_, id, params);
+    if (method == "assemble")
+        return HandleAssemble(worker_, id, params);
+    if (method == "patches.list")
+        return HandlePatchesList(worker_, id);
+    if (method == "patches.restore")
+        return HandlePatchesRestore(worker_, id, params);
+    if (method == "patches.apply_to_file")
+        return HandlePatchesApplyToFile(worker_, id, params);
+    if (method == "memory.set_rights")
+        return HandleMemorySetRights(worker_, id, params);
 
     return BuildErrorResponse(id, ipc::ErrorCode::UnknownMethod, "Unknown method: " + method);
 }

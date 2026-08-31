@@ -310,4 +310,62 @@ bool IsLogCaptureActive();
 // outside.
 std::string LogCaptureFilePath();
 
+// Writes bytes into the debuggee. When recordPatch is true the change goes
+// through MemPatch, which records it in the patch list so it can be undone
+// later (see RestorePatches) and exported to a file (see
+// ApplyPatchesToFile); when false it goes through DbgMemWrite, a plain
+// write with no such bookkeeping. Requires active debugging and a pause:
+// see RequirePaused in debugger.cpp for why writing while the process runs
+// is refused — the bytes could be executed halfway through the write.
+bool WriteMemory(unsigned long long address, const std::vector<unsigned char>& data,
+                 bool recordPatch, std::string& error);
+
+// Sets a named value: a register such as "rax"/"eax", or any other
+// debugger variable, via the "mov"/"set" command (SSE registers are not
+// supported through this path). Requires active debugging and a pause, for
+// the same reason as WriteMemory.
+bool SetNamedValue(const std::string& name, unsigned long long value, std::string& error);
+
+// Result of assembling one instruction.
+struct AssembleResult { size_t size = 0; };
+
+// Assembles one instruction at address, overwriting whatever was there.
+// fillNop pads the remainder of a replaced longer instruction with nops.
+// Requires active debugging and a pause, for the same reason as WriteMemory.
+bool AssembleAt(unsigned long long address, const std::string& instruction,
+                bool fillNop, AssembleResult& out, std::string& error);
+
+// A single byte patch recorded by the debugger (via WriteMemory with
+// recordPatch, or elsewhere in x64dbg).
+struct PatchEntry
+{
+    unsigned long long address = 0;
+    unsigned int oldByte = 0, newByte = 0;
+    std::string module;
+};
+
+// Lists all currently recorded patches. An empty list is a normal result,
+// not an error. Requires active debugging.
+bool ListPatches(std::vector<PatchEntry>& out, std::string& error);
+
+// Restores a single patched address, or a whole [address, end) range when
+// hasRange is true, writing the original bytes back. Requires active
+// debugging and a pause, for the same reason as WriteMemory.
+bool RestorePatches(unsigned long long address, unsigned long long end, bool hasRange,
+                    size_t& restored, std::string& error);
+
+// Writes all currently recorded patches into a copy of the module on disk
+// at filePath; the running process itself is not touched. Requires active
+// debugging.
+bool ApplyPatchesToFile(const std::string& filePath, int& patched, std::string& error);
+
+// Sets the page protection rights of the region containing address. rights
+// is one of Execute, ExecuteRead, ExecuteReadWrite, ExecuteWriteCopy,
+// NoAccess, ReadOnly, ReadWrite, WriteCopy, optionally prefixed with "G" for
+// a guard page (the same words MemPageRightsFromString accepts) — NOT the
+// compact form GetMemoryMap reports (e.g. "ERW-"), which only PageRightsToString
+// produces. Requires active debugging and a pause, for the same reason as
+// WriteMemory.
+bool SetPageProtection(unsigned long long address, const std::string& rights, std::string& error);
+
 } // namespace x64dbg_mcp::plugin

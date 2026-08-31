@@ -96,14 +96,18 @@ bool RequireDebugging(std::string& error)
 // Registers, the call stack, and stack contents are only meaningful while
 // the process is paused: during execution they change at arbitrary moments,
 // and x64dbg would return a stale or arbitrary snapshot (see the analogous
-// restriction for cip in GetStatus).
+// restriction for cip in GetStatus). Writes are refused for a different
+// reason: the bytes being written could be executed halfway through the
+// write, since the process keeps running concurrently with it. what
+// completes the sentence "pause it before ..." (e.g. "reading registers",
+// "writing memory"), so it must describe the action, not just its subject.
 bool RequirePaused(const char* what, std::string& error)
 {
     if (!RequireDebugging(error))
         return false;
     if (DbgIsRunning())
     {
-        error = std::string("The process is currently running: pause it before reading ") + what;
+        error = std::string("The process is currently running: pause it before ") + what;
         return false;
     }
     return true;
@@ -503,6 +507,36 @@ bool SnapshotLog(std::string& contents, std::string& error)
     std::lock_guard<std::mutex> lock(g_logCaptureMutex);
     g_logCapture.lastSnapshotOk = ok;
     return ok;
+}
+
+// Fetches the current patch list into out, following the two-phase
+// enumeration PatchEnum requires: call it once with a null buffer to learn
+// the byte count, then again with a buffer sized for that many
+// DBGPATCHINFO entries. The buffer is ordinary heap memory owned by the
+// std::vector, not bridge memory, so nothing needs to be freed manually.
+bool FetchPatchList(std::vector<DBGPATCHINFO>& out, std::string& error)
+{
+    out.clear();
+    auto* functions = DbgFunctions();
+
+    size_t byteSize = 0;
+    if (!functions->PatchEnum(nullptr, &byteSize))
+    {
+        error = "Failed to retrieve the patch list";
+        return false;
+    }
+    const size_t count = byteSize / sizeof(DBGPATCHINFO);
+    if (count == 0)
+        return true;
+
+    out.resize(count);
+    if (!functions->PatchEnum(out.data(), nullptr))
+    {
+        out.clear();
+        error = "Failed to retrieve the patch list";
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -1402,7 +1436,7 @@ bool ReadRegisters(bool includeSimd, RegisterDump& out, std::string& error)
     out = RegisterDump{};
     try
     {
-        if (!RequirePaused("registers", error))
+        if (!RequirePaused("reading registers", error))
             return false;
 
         REGDUMP_AVX512 dump = {};
@@ -1478,7 +1512,7 @@ bool GetCallStack(unsigned int threadId, std::vector<CallStackFrame>& out, std::
     out.clear();
     try
     {
-        if (!RequirePaused("the call stack", error))
+        if (!RequirePaused("reading the call stack", error))
             return false;
 
         DBGCALLSTACK callstack = {};
@@ -1551,7 +1585,7 @@ bool ReadStack(size_t count, std::vector<StackSlot>& out, std::string& error)
     out.clear();
     try
     {
-        if (!RequirePaused("the stack", error))
+        if (!RequirePaused("reading the stack", error))
             return false;
         if (count < kMinStackSlots || count > kMaxStackSlots)
         {
@@ -1599,7 +1633,7 @@ bool ReadStringAt(unsigned long long address, std::string& out, std::string& err
     out.clear();
     try
     {
-        if (!RequirePaused("a string", error))
+        if (!RequirePaused("reading a string", error))
             return false;
 
         char text[MAX_STRING_SIZE] = {};
@@ -1660,7 +1694,7 @@ bool FindPattern(unsigned long long start, unsigned long long size, const std::s
     truncated = false;
     try
     {
-        if (!RequirePaused("memory for a pattern", error))
+        if (!RequirePaused("reading memory for a pattern", error))
             return false;
 
         if (pattern.empty() || !LooksLikeValidPattern(pattern))
@@ -1719,7 +1753,7 @@ bool GetXrefs(unsigned long long address, std::vector<XrefEntry>& out, std::stri
     out.clear();
     try
     {
-        if (!RequirePaused("cross-references", error))
+        if (!RequirePaused("reading cross-references", error))
             return false;
 
         // DbgXrefGet's own handler treats "zero references" as failure (see
@@ -2026,6 +2060,275 @@ std::string LogCaptureFilePath()
     if (path.empty())
         return {};
     return WideToUtf8(path);
+}
+
+bool WriteMemory(unsigned long long address, const std::vector<unsigned char>& data,
+                 bool recordPatch, std::string& error)
+{
+    try
+    {
+        if (!RequirePaused("writing memory", error))
+            return false;
+        if (data.empty())
+        {
+            error = "Data to write must not be empty";
+            return false;
+        }
+        if (data.size() > kMaxReadSize)
+        {
+            error = "Requested write size exceeds the maximum of 1 MiB";
+            return false;
+        }
+
+        const duint addr = static_cast<duint>(address);
+        // MemPatch records the change in the patch list, which is what makes
+        // it undoable (RestorePatches) and exportable to a file
+        // (ApplyPatchesToFile); DbgMemWrite writes the bytes directly, with
+        // no such bookkeeping.
+        const bool ok = recordPatch
+            ? DbgFunctions()->MemPatch(addr, data.data(), static_cast<duint>(data.size()))
+            : DbgMemWrite(addr, data.data(), static_cast<duint>(data.size()));
+        if (!ok)
+        {
+            error = "Failed to write memory at the given address";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while writing memory";
+        return false;
+    }
+}
+
+bool SetNamedValue(const std::string& name, unsigned long long value, std::string& error)
+{
+    try
+    {
+        if (!RequirePaused("writing a register or variable", error))
+            return false;
+        if (name.empty())
+        {
+            error = "Parameter \"name\" must not be empty";
+            return false;
+        }
+
+        // Not calling DbgValSetScalar directly: the SDK header we compile
+        // against is newer than the debuggers people actually run, and this
+        // particular function is a case in point — it was named
+        // DbgValToString in older builds and only later renamed to
+        // DbgValSetScalar. Importing a symbol the host does not export
+        // prevents the whole plugin from loading (Windows refuses to
+        // resolve the DLL's import table), so instead we go through the
+        // "mov" command (alias "set"), which x64dbg resolves at run time
+        // and which therefore works across versions regardless of what the
+        // installed build exports.
+        const std::string cmd = "mov " + name + ", " + FormatHexAddress(value);
+        if (!DbgCmdExecDirect(cmd.c_str()))
+        {
+            error = "The debugger rejected the assignment \"" + name + "\": expected a register name such as "
+                    "\"rax\" or \"eax\", or an existing debugger variable; SSE registers are not supported "
+                    "through this path";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while setting the value";
+        return false;
+    }
+}
+
+bool AssembleAt(unsigned long long address, const std::string& instruction,
+                bool fillNop, AssembleResult& out, std::string& error)
+{
+    out = AssembleResult{};
+    try
+    {
+        if (!RequirePaused("assembling an instruction", error))
+            return false;
+        if (instruction.empty())
+        {
+            error = "Instruction text must not be empty";
+            return false;
+        }
+
+        const duint addr = static_cast<duint>(address);
+        char errorBuf[MAX_ERROR_SIZE] = {};
+        if (!DbgFunctions()->AssembleAtEx(addr, instruction.c_str(), errorBuf, fillNop))
+        {
+            // The assembler's own message explains exactly what is wrong
+            // with the instruction text, so it is surfaced verbatim.
+            error = errorBuf[0] ? errorBuf : "The assembler rejected the instruction";
+            return false;
+        }
+
+        BASIC_INSTRUCTION_INFO basicInfo = {};
+        DbgDisasmFastAt(addr, &basicInfo);
+        out.size = basicInfo.size > 0 ? static_cast<size_t>(basicInfo.size) : 0;
+        return true;
+    }
+    catch (...)
+    {
+        out = AssembleResult{};
+        error = "Internal error while assembling the instruction";
+        return false;
+    }
+}
+
+bool ListPatches(std::vector<PatchEntry>& out, std::string& error)
+{
+    out.clear();
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        std::vector<DBGPATCHINFO> patches;
+        if (!FetchPatchList(patches, error))
+            return false;
+
+        out.reserve(patches.size());
+        for (const auto& patch : patches)
+        {
+            if (!patch.addr)
+                continue;
+            PatchEntry entry;
+            entry.address = static_cast<unsigned long long>(patch.addr);
+            entry.oldByte = patch.oldbyte;
+            entry.newByte = patch.newbyte;
+            entry.module = patch.mod;
+            out.push_back(std::move(entry));
+        }
+        return true;
+    }
+    catch (...)
+    {
+        out.clear();
+        error = "Internal error while listing patches";
+        return false;
+    }
+}
+
+bool RestorePatches(unsigned long long address, unsigned long long end, bool hasRange,
+                    size_t& restored, std::string& error)
+{
+    restored = 0;
+    try
+    {
+        if (!RequirePaused("restoring a patch", error))
+            return false;
+
+        auto* functions = DbgFunctions();
+
+        if (!hasRange)
+        {
+            DBGPATCHINFO info = {};
+            const bool existed = functions->PatchGetEx(static_cast<duint>(address), &info);
+            functions->PatchRestore(static_cast<duint>(address));
+            restored = existed ? 1 : 0;
+            return true;
+        }
+
+        // PatchRestoreRange returns nothing and reports no count, so the
+        // number restored is derived by enumerating the patch list before
+        // and after and comparing how many fell inside the range.
+        std::vector<PatchEntry> before;
+        if (!ListPatches(before, error))
+            return false;
+        size_t beforeInRange = 0;
+        for (const auto& patch : before)
+            if (patch.address >= address && patch.address < end)
+                ++beforeInRange;
+
+        functions->PatchRestoreRange(static_cast<duint>(address), static_cast<duint>(end));
+
+        std::vector<PatchEntry> after;
+        if (!ListPatches(after, error))
+            return false;
+        size_t afterInRange = 0;
+        for (const auto& patch : after)
+            if (patch.address >= address && patch.address < end)
+                ++afterInRange;
+
+        restored = beforeInRange > afterInRange ? beforeInRange - afterInRange : 0;
+        return true;
+    }
+    catch (...)
+    {
+        restored = 0;
+        error = "Internal error while restoring patches";
+        return false;
+    }
+}
+
+bool ApplyPatchesToFile(const std::string& filePath, int& patched, std::string& error)
+{
+    patched = 0;
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+        if (filePath.empty())
+        {
+            error = "Parameter \"path\" must not be empty";
+            return false;
+        }
+
+        std::vector<DBGPATCHINFO> patches;
+        if (!FetchPatchList(patches, error))
+            return false;
+
+        // Writes a patched copy of the module to filePath; the running
+        // process itself is not modified by this call.
+        char errorBuf[MAX_ERROR_SIZE] = {};
+        const int result = DbgFunctions()->PatchFile(patches.data(), static_cast<int>(patches.size()),
+            filePath.c_str(), errorBuf);
+        if (result < 0)
+        {
+            error = errorBuf[0] ? errorBuf : "Failed to apply patches to the file";
+            return false;
+        }
+
+        patched = result;
+        return true;
+    }
+    catch (...)
+    {
+        patched = 0;
+        error = "Internal error while applying patches to the file";
+        return false;
+    }
+}
+
+bool SetPageProtection(unsigned long long address, const std::string& rights, std::string& error)
+{
+    try
+    {
+        if (!RequirePaused("changing page protection", error))
+            return false;
+        if (rights.empty())
+        {
+            error = "Parameter \"rights\" must not be empty";
+            return false;
+        }
+
+        if (!DbgFunctions()->SetPageRights(static_cast<duint>(address), rights.c_str()))
+        {
+            error = "Failed to set page rights to \"" + rights + "\": expected one of Execute, ExecuteRead, "
+                    "ExecuteReadWrite, ExecuteWriteCopy, NoAccess, ReadOnly, ReadWrite, WriteCopy, optionally "
+                    "prefixed with \"G\" for a guard page; the current rights of a region can be seen in the memory map";
+            return false;
+        }
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while setting page protection";
+        return false;
+    }
 }
 
 } // namespace x64dbg_mcp::plugin
