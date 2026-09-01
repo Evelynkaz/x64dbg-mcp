@@ -246,6 +246,17 @@ Beyond tools, the server exposes MCP resources: static or read-only data a clien
 | `x64dbg://memory-map` | The debuggee's memory regions. |
 | `x64dbg://disassembly/current` | Disassembly at the current instruction. |
 
+## Prompts
+
+The server also exposes MCP prompts: reusable starting procedures for the reverse-engineering workflows it exists to support. A prompt does not act on the debugger by itself — it returns a block of instructions naming the real tools to call and in what order, for the model to follow.
+
+| Name | What it starts |
+|---|---|
+| `analyze_function` | Understanding what a single function does: its boundaries, callers, called APIs, and strings, ending with the finding recorded in the debugger's own database. |
+| `trace_to_api_call` | Stopping execution exactly when the debuggee calls a chosen API function, then inspecting the call's arguments and caller. |
+| `defeat_anti_debugging` | Finding and neutralizing anti-debugging checks: the common API-based checks, exception-based tricks, and timing-based tricks. |
+| `analyze_virtualized_code` | Reverse-engineering a code virtualization protector's VM: locating the dispatcher, tracing virtual instructions one at a time inside the debugger, and building a map of handler addresses to their effect. |
+
 ## Security and risks
 
 This server gives the model full access to the debugger: reading memory, controlling execution, setting breakpoints, and, just as much, writing to the debuggee — patching memory, assembling instructions, changing registers, and running arbitrary x64dbg commands and scripts in the debuggee's own context. It can also attach to a process the user did not start from x64dbg, allocate executable memory inside a process, and write regions of process memory to files on disk. Please read this before pointing it at anything important:
@@ -298,7 +309,7 @@ The C runtime is linked statically, so there is nothing extra to redistribute al
 
 ## Limitations
 
-Not implemented yet: MCP prompts (the scenario prompts described in `docs/tools.md`), a function's control-flow graph, and configuring the log text and condition used during tracing. A handful of convenience tools that would bundle several existing calls into one — a post-halt snapshot, a one-call function breakdown, searching for immediate values, and a registers diff — are also planned but not built. Deliberately out of scope for now: working with types and structures, graphical interaction, managing x64dbg windows, and source-level debugging. See `docs/tools.md` for the full roadmap.
+Not implemented yet: a function's control-flow graph, and configuring the log text and condition used during tracing. A handful of convenience tools that would bundle several existing calls into one — a post-halt snapshot, a one-call function breakdown, searching for immediate values, and a registers diff — are also planned but not built. Deliberately out of scope for now: working with types and structures, graphical interaction, managing x64dbg windows, and source-level debugging. See `docs/tools.md` for the full roadmap.
 
 ## License
 

@@ -1,5 +1,6 @@
 #include "bridge/mcp_server.h"
 #include "bridge/plugin_link.h"
+#include "bridge/prompt_registry.h"
 #include "bridge/resource_registry.h"
 #include "bridge/tool_registry.h"
 #include "common/pipe_server.h"
@@ -13,12 +14,15 @@
 #include <vector>
 
 using x64dbg_mcp::PipeServer;
+using x64dbg_mcp::bridge::CreateDefaultPromptRegistry;
 using x64dbg_mcp::bridge::CreateDefaultRegistry;
 using x64dbg_mcp::bridge::CreateDefaultResourceRegistry;
 using x64dbg_mcp::bridge::kLegacyVersions;
 using x64dbg_mcp::bridge::kModernVersion;
 using x64dbg_mcp::bridge::McpServer;
 using x64dbg_mcp::bridge::PluginLink;
+using x64dbg_mcp::bridge::Prompt;
+using x64dbg_mcp::bridge::PromptRegistry;
 using x64dbg_mcp::bridge::Resource;
 using x64dbg_mcp::bridge::ResourceRegistry;
 using x64dbg_mcp::bridge::Tool;
@@ -42,10 +46,11 @@ std::string MakeMcpTestPipeName()
 // but it's easier to read scenarios in isolation this way. Includes the
 // default resources (no link, so reads explain there is no connection
 // rather than failing) so resources/list and resources/read tests have
-// real, known uris to exercise.
+// real, known uris to exercise, and the default prompts so prompts/list
+// and prompts/get tests have real, known names to exercise.
 McpServer MakeServer()
 {
-    return McpServer(CreateDefaultRegistry(), CreateDefaultResourceRegistry());
+    return McpServer(CreateDefaultRegistry(), CreateDefaultResourceRegistry(), CreateDefaultPromptRegistry());
 }
 
 json Parse(const std::string& response)
@@ -833,4 +838,166 @@ TEST_CASE("mcp: server/discover capabilities include resources") {
 
     const json msg = Parse(*response);
     REQUIRE(msg["result"]["capabilities"].contains("resources"));
+}
+
+// ---- Prompts ----
+
+TEST_CASE("mcp: prompts/list in the legacy model returns the registered prompts with all fields") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":60,"method":"prompts/list","params":{}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    REQUIRE(msg["result"]["prompts"].is_array());
+    REQUIRE_FALSE(msg["result"]["prompts"].empty());
+    // The legacy model does not wrap the result in the modern envelope.
+    CHECK_FALSE(msg["result"].contains("resultType"));
+
+    const json& first = msg["result"]["prompts"][0];
+    CHECK(first.contains("name"));
+    CHECK(first.contains("title"));
+    CHECK(first.contains("description"));
+    REQUIRE(first["arguments"].is_array());
+}
+
+TEST_CASE("mcp: prompts/list in the modern model contains resultType complete") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":61,"method":"prompts/list",
+        "params":{"_meta":{
+            "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities":{}}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK(msg["result"]["resultType"] == "complete");
+    REQUIRE(msg["result"]["prompts"].is_array());
+    REQUIRE_FALSE(msg["result"]["prompts"].empty());
+}
+
+TEST_CASE("mcp: prompts/get returns messages for a prompt with a required argument in the legacy model") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":62,"method":"prompts/get",
+        "params":{"name":"trace_to_api_call","arguments":{"api_name":"kernel32.CreateFileW"}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    REQUIRE(msg["result"].contains("description"));
+    REQUIRE(msg["result"]["messages"].is_array());
+    REQUIRE(msg["result"]["messages"].size() == 1);
+    CHECK(msg["result"]["messages"][0]["role"] == "user");
+    const std::string text = msg["result"]["messages"][0]["content"]["text"].get<std::string>();
+    CHECK(text.find("kernel32.CreateFileW") != std::string::npos);
+    CHECK(text.find("set_breakpoint") != std::string::npos);
+}
+
+TEST_CASE("mcp: prompts/get renders an optional argument that was omitted without an empty placeholder in the modern model") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":63,"method":"prompts/get",
+        "params":{"name":"analyze_function",
+        "_meta":{
+            "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities":{}}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK(msg["result"]["resultType"] == "complete");
+    const std::string text = msg["result"]["messages"][0]["content"]["text"].get<std::string>();
+    CHECK(text.find("current instruction pointer") != std::string::npos);
+    CHECK(text.find("disassemble_function") != std::string::npos);
+}
+
+TEST_CASE("mcp: prompts/get for an unknown prompt name -> error -32602") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":64,"method":"prompts/get",
+        "params":{"name":"no_such_prompt"}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK_FALSE(msg.contains("result"));
+    CHECK(msg["error"]["code"] == -32602);
+    CHECK(msg["error"]["message"].get<std::string>().find("no_such_prompt") != std::string::npos);
+}
+
+TEST_CASE("mcp: prompts/get without params.name -> error -32602") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":65,"method":"prompts/get","params":{}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK(msg["error"]["code"] == -32602);
+}
+
+TEST_CASE("mcp: prompts/get with a non-string name -> error -32602") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":66,"method":"prompts/get","params":{"name":42}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK(msg["error"]["code"] == -32602);
+}
+
+TEST_CASE("mcp: prompts/get missing a required argument -> error -32602 naming it") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":67,"method":"prompts/get",
+        "params":{"name":"trace_to_api_call","arguments":{}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK(msg["error"]["code"] == -32602);
+    CHECK(msg["error"]["message"].get<std::string>().find("api_name") != std::string::npos);
+}
+
+// The regression test for the running server having advertised the
+// 'prompts' capability while main.cpp passed an empty registry to
+// McpServer: CreateDefaultPromptRegistry must actually register all four
+// prompts, not just be reachable from tests that build their own registry.
+TEST_CASE("mcp: CreateDefaultPromptRegistry registers all four prompts") {
+    PromptRegistry prompts = CreateDefaultPromptRegistry();
+
+    CHECK(prompts.Find("analyze_function") != nullptr);
+    CHECK(prompts.Find("trace_to_api_call") != nullptr);
+    CHECK(prompts.Find("defeat_anti_debugging") != nullptr);
+    CHECK(prompts.Find("analyze_virtualized_code") != nullptr);
+}
+
+TEST_CASE("mcp: initialize capabilities include prompts") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":68,"method":"initialize",
+        "params":{"protocolVersion":"2025-11-25","capabilities":{}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    REQUIRE(msg["result"]["capabilities"].contains("prompts"));
+}
+
+TEST_CASE("mcp: server/discover capabilities include prompts") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":"d3","method":"server/discover",
+        "params":{"_meta":{
+            "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities":{}}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    REQUIRE(msg["result"]["capabilities"].contains("prompts"));
 }

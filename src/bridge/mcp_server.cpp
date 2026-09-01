@@ -115,7 +115,8 @@ nlohmann::json BuildCapabilities()
 {
     return nlohmann::json{
         {"tools", nlohmann::json::object()},
-        {"resources", {{"subscribe", false}, {"listChanged", false}}}
+        {"resources", {{"subscribe", false}, {"listChanged", false}}},
+        {"prompts", {{"listChanged", false}}}
     };
 }
 
@@ -175,8 +176,8 @@ bool IsModernProtocol(const std::string& method, const nlohmann::json& params)
 
 } // namespace
 
-McpServer::McpServer(ToolRegistry registry, ResourceRegistry resources)
-    : registry_(std::move(registry)), resources_(std::move(resources))
+McpServer::McpServer(ToolRegistry registry, ResourceRegistry resources, PromptRegistry prompts)
+    : registry_(std::move(registry)), resources_(std::move(resources)), prompts_(std::move(prompts))
 {
 }
 
@@ -284,6 +285,55 @@ nlohmann::json McpServer::HandleResourcesRead(const nlohmann::json& params) cons
     return nlohmann::json{
         {"contents", nlohmann::json::array({
             { {"uri", uri}, {"mimeType", resource->mimeType}, {"text", text} }
+        })}
+    };
+}
+
+nlohmann::json McpServer::HandlePromptsList() const
+{
+    return nlohmann::json{ {"prompts", prompts_.ListJson()} };
+}
+
+nlohmann::json McpServer::HandlePromptsGet(const nlohmann::json& params) const
+{
+    // A malformed request per the MCP specification's classification is a
+    // protocol error, not a prompt result.
+    if (!params.is_object() || !params.contains("name") || !params["name"].is_string())
+        throw ProtocolError{ -32602, "params.name must be present and must be a string containing the prompt name" };
+
+    const std::string name = params["name"].get<std::string>();
+
+    nlohmann::json arguments = nlohmann::json::object();
+    if (params.contains("arguments"))
+    {
+        if (!params["arguments"].is_object())
+            throw ProtocolError{ -32602, "params.arguments must be an object" };
+        arguments = params["arguments"];
+    }
+
+    // Unlike an unknown resource uri, the MCP specification classifies an
+    // unknown prompt name under invalid params rather than a resource-style
+    // not-found error.
+    const Prompt* prompt = prompts_.Find(name);
+    if (prompt == nullptr)
+        throw ProtocolError{ -32602, "Unknown prompt: " + name };
+
+    for (const PromptArgument& argument : prompt->arguments)
+    {
+        if (!argument.required)
+            continue;
+        if (!arguments.contains(argument.name) || !arguments[argument.name].is_string() ||
+            arguments[argument.name].get<std::string>().empty())
+        {
+            throw ProtocolError{ -32602, "Missing required argument '" + argument.name + "' for prompt " + name };
+        }
+    }
+
+    const std::string text = prompt->render(arguments);
+    return nlohmann::json{
+        {"description", prompt->description},
+        {"messages", nlohmann::json::array({
+            { {"role", "user"}, {"content", { {"type", "text"}, {"text", text} }} }
         })}
     };
 }
@@ -408,6 +458,8 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
                 result = HandleToolsList();
             else if (method == "resources/list")
                 result = HandleResourcesList();
+            else if (method == "prompts/list")
+                result = HandlePromptsList();
             else if (method == "ping")
                 result = nlohmann::json::object();
             else if (method == "tools/call")
@@ -426,6 +478,17 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
                 try
                 {
                     result = HandleResourcesRead(params);
+                }
+                catch (const ProtocolError& e)
+                {
+                    return MakeErrorResponse(id, e.code, e.message).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+                }
+            }
+            else if (method == "prompts/get")
+            {
+                try
+                {
+                    result = HandlePromptsGet(params);
                 }
                 catch (const ProtocolError& e)
                 {
@@ -473,6 +536,9 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
         if (method == "resources/list")
             return MakeResultResponse(id, HandleResourcesList()).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
+        if (method == "prompts/list")
+            return MakeResultResponse(id, HandlePromptsList()).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+
         if (method == "ping")
             return MakeResultResponse(id, nlohmann::json::object()).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
@@ -493,6 +559,18 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
             try
             {
                 return MakeResultResponse(id, HandleResourcesRead(params)).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+            }
+            catch (const ProtocolError& e)
+            {
+                return MakeErrorResponse(id, e.code, e.message).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+            }
+        }
+
+        if (method == "prompts/get")
+        {
+            try
+            {
+                return MakeResultResponse(id, HandlePromptsGet(params)).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
             }
             catch (const ProtocolError& e)
             {

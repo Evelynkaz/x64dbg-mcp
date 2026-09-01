@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bridge/prompt_registry.h"
 #include "bridge/resource_registry.h"
 #include "bridge/tool_registry.h"
 #include "nlohmann/json.hpp"
@@ -24,7 +25,8 @@ constexpr const char* kLegacyVersions[] = { "2025-11-25", "2025-06-18", "2025-03
 class McpServer
 {
 public:
-    explicit McpServer(ToolRegistry registry, ResourceRegistry resources = ResourceRegistry());
+    explicit McpServer(ToolRegistry registry, ResourceRegistry resources = ResourceRegistry(),
+                        PromptRegistry prompts = PromptRegistry());
 
     // Handles one incoming message (one line of JSON). Returns a response
     // string, or std::nullopt if no reply is needed (notifications require
@@ -35,11 +37,14 @@ public:
 private:
     ToolRegistry registry_;
     ResourceRegistry resources_;
+    PromptRegistry prompts_;
 
     nlohmann::json HandleToolsList() const;
     nlohmann::json HandleToolsCall(const nlohmann::json& params) const;
     nlohmann::json HandleResourcesList() const;
     nlohmann::json HandleResourcesRead(const nlohmann::json& params) const;
+    nlohmann::json HandlePromptsList() const;
+    nlohmann::json HandlePromptsGet(const nlohmann::json& params) const;
     nlohmann::json HandleDiscover() const;
 };
 

@@ -81,6 +81,10 @@ add_library(x64dbg-mcp-bridge-core STATIC
     src/bridge/tool_registry.cpp
     src/bridge/resource_registry.h
     src/bridge/resource_registry.cpp
+    src/bridge/prompt_registry.h
+    src/bridge/prompt_registry.cpp
+    src/bridge/debugger_prompts.h
+    src/bridge/debugger_prompts.cpp
     src/bridge/mcp_server.h
     src/bridge/mcp_server.cpp
 )
