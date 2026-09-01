@@ -769,6 +769,112 @@ std::string FormatDisassembleFunction(const nlohmann::json& result)
     return out.str();
 }
 
+// Header with the function's entry point and block count, then a table of
+// basic blocks: address range, instruction count, and successors — for a
+// conditional block, both the taken and fall-through targets; a "return"
+// marker for a terminal block; an "indirect call" marker. If the graph was
+// truncated at the block limit, a line about it.
+std::string FormatFunctionGraph(const nlohmann::json& result)
+{
+    const std::uint64_t entryPoint = result.value("entryPoint", 0ULL);
+    const nlohmann::json blocks = result.value("blocks", nlohmann::json::array());
+
+    std::ostringstream out;
+    out << "Function graph for 0x" << std::hex << entryPoint << ", " << std::dec
+        << blocks.size() << " block" << (blocks.size() == 1 ? "" : "s") << ".\n\n";
+
+    out << std::left
+        << std::setw(34) << "Range"
+        << std::setw(10) << "Instrs"
+        << "Successors" << '\n';
+
+    for (const auto& block : blocks)
+    {
+        const std::uint64_t start = block.value("start", 0ULL);
+        const std::uint64_t end = block.value("end", 0ULL);
+        const unsigned int instructionCount = block.value("instructionCount", 0u);
+        const std::uint64_t brTrue = block.value("brTrue", 0ULL);
+        const std::uint64_t brFalse = block.value("brFalse", 0ULL);
+        const bool terminal = block.value("terminal", false);
+        const bool indirectCall = block.value("indirectCall", false);
+        const nlohmann::json exits = block.value("exits", nlohmann::json::array());
+
+        std::ostringstream rangeText;
+        rangeText << "0x" << std::hex << start << "-0x" << end;
+
+        std::ostringstream successors;
+        auto appendSuccessor = [&successors](const std::string& text)
+        {
+            if (successors.tellp() > 0)
+                successors << ", ";
+            successors << text;
+        };
+        auto hexAddr = [](std::uint64_t addr)
+        {
+            std::ostringstream text;
+            text << "0x" << std::hex << addr;
+            return text.str();
+        };
+
+        if (terminal)
+        {
+            // A ret always ends the block here; even if exits somehow lists
+            // something, "return" is the correct and only label.
+            appendSuccessor("return");
+        }
+        else if (brTrue != 0 && brFalse != 0)
+        {
+            appendSuccessor(hexAddr(brTrue) + " (taken)");
+            appendSuccessor(hexAddr(brFalse) + " (fall-through)");
+        }
+        else if (brTrue != 0 || brFalse != 0)
+        {
+            const std::uint64_t conditionalTarget = brTrue != 0 ? brTrue : brFalse;
+            const char* conditionalLabel = brTrue != 0 ? " (taken)" : " (fall-through)";
+            const char* otherLabel = brTrue != 0 ? " (fall-through)" : " (taken)";
+            appendSuccessor(hexAddr(conditionalTarget) + conditionalLabel);
+            for (const auto& exit : exits)
+            {
+                const std::uint64_t exitAddr = exit.get<std::uint64_t>();
+                if (exitAddr != conditionalTarget)
+                    appendSuccessor(hexAddr(exitAddr) + otherLabel);
+            }
+        }
+        else
+        {
+            // brTrue and brFalse are both zero for an unconditional jump or a
+            // plain fall-through: the block's only real successor(s) live in
+            // exits. Rendering "(none)" here — as this code used to do — hid
+            // convergent control flow as a false dead end, so this branch
+            // must consult exits rather than the (empty) branch fields.
+            if (exits.size() == 1)
+            {
+                appendSuccessor(hexAddr(exits[0].get<std::uint64_t>()) + " (unconditional)");
+            }
+            else
+            {
+                for (const auto& exit : exits)
+                    appendSuccessor(hexAddr(exit.get<std::uint64_t>()));
+                if (exits.size() > 1)
+                    successors << " (exits)";
+            }
+        }
+        if (indirectCall)
+            appendSuccessor("indirect call");
+        if (successors.tellp() == 0)
+            successors << "(none)";
+
+        out << std::left
+            << std::setw(34) << rangeText.str()
+            << std::setw(10) << instructionCount
+            << successors.str() << '\n';
+    }
+
+    if (result.value("truncated", false))
+        out << "Block list truncated at the tool's limit.\n";
+    return out.str();
+}
+
 // Human-readable summary of command.exec: whether the command was
 // accepted, a note if log capture is inactive, then its output verbatim.
 std::string FormatCommandResult(const nlohmann::json& result)
@@ -2635,6 +2741,86 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(disassembleFunction));
+
+    Tool functionGraph;
+    functionGraph.name = "function_graph";
+    functionGraph.description =
+        "Build the control-flow graph of the function containing an "
+        "address: its basic blocks and the branches between them. Each "
+        "block reports its address range, instruction count, its "
+        "taken-branch and fall-through targets (0 if it has none), "
+        "whether it ends in a return, whether it contains an indirect "
+        "call, and the full list of its successor addresses. Use this to "
+        "understand a function's structure at a glance and to follow "
+        "conditional branches without disassembling instruction by "
+        "instruction; it is especially useful against obfuscated or "
+        "virtualized code, where a virtualization dispatcher shows up as "
+        "one large central block that many other blocks branch back "
+        "into, and blocks with an indirect call or with a branch target "
+        "the debugger could not resolve are exactly where obfuscated "
+        "control flow tends to hide. Parameters: 'address' — a "
+        "non-negative integer giving an address inside the function to "
+        "graph (a number, not a hex string); if omitted or 0, the "
+        "current instruction pointer is used instead, which requires an "
+        "active, paused debugging session. Limitations: like "
+        "disassemble_function, this relies on the debugger's analysis, "
+        "so it fails or returns an empty graph if the function's module "
+        "has not been analyzed yet — run the 'analyse' command with the "
+        "execute_command tool first; the block list is capped, and the "
+        "result's 'truncated' field, and the human-readable text, say "
+        "plainly when the cap was hit.";
+    functionGraph.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"address", {
+                {"type", "integer"},
+                {"minimum", 0},
+                {"description",
+                 "Address inside the function to graph, given as a number "
+                 "(not a hex string). Omit or pass 0 to use the current "
+                 "instruction pointer, which requires an active, paused "
+                 "debugging session."}
+            }}
+        }},
+        {"additionalProperties", false}
+    };
+    functionGraph.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("function_graph: plugin link is not configured");
+
+        std::uint64_t address = 0;
+        if (arguments.contains("address"))
+        {
+            if (!arguments["address"].is_number_integer() || arguments["address"].get<long long>() < 0)
+                throw ToolError("function_graph: 'address' must be a non-negative integer");
+            address = arguments["address"].get<std::uint64_t>();
+        }
+
+        if (address == 0)
+        {
+            const nlohmann::json status = link->Call("debugger.status", nlohmann::json::object());
+            if (!status.value("debugging", false) || status.value("running", false))
+                throw ToolError(
+                    "function_graph: no 'address' was given and the current instruction "
+                    "pointer is not available — there is no active debugging session, or "
+                    "the process is running; pause the debuggee or pass an explicit address");
+            address = status.value("cip", 0ULL);
+            if (address == 0)
+                throw ToolError(
+                    "function_graph: no 'address' was given and the current instruction "
+                    "pointer could not be determined");
+        }
+
+        ToolResult result;
+        result.structuredContent = link->Call("function.graph", {
+            {"address", address}
+        });
+        result.text = FormatFunctionGraph(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(functionGraph));
 
     Tool executeCommand;
     executeCommand.name = "execute_command";

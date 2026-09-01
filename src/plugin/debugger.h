@@ -258,6 +258,39 @@ bool GetXrefs(unsigned long long address, std::vector<XrefEntry>& out, std::stri
 // Boundaries of the function containing an address. Requires active debugging.
 bool GetFunctionRange(unsigned long long address, unsigned long long& start, unsigned long long& end, std::string& error);
 
+// Upper limit on the number of basic blocks returned by a single
+// AnalyzeFunctionGraph call: a pathologically large or obfuscated function
+// could otherwise produce an unbounded response.
+constexpr size_t kMaxCfgBlocks = 4096;
+
+// A single basic block of a function's control-flow graph.
+struct CfgBlock
+{
+    unsigned long long start = 0;
+    unsigned long long end = 0;          // inclusive address of the last instruction
+    unsigned long long brTrue = 0;       // taken-branch target, 0 if none
+    unsigned long long brFalse = 0;      // fall-through / not-taken target, 0 if none
+    unsigned int instructionCount = 0;
+    bool terminal = false;               // block ends in a return
+    bool split = false;                  // brTrue is simply the next block
+    bool indirectCall = false;           // block contains an indirect call
+    std::vector<unsigned long long> exits;
+};
+
+// The control-flow graph of a function: its basic blocks and the branches
+// between them.
+struct FunctionGraph
+{
+    unsigned long long entryPoint = 0;
+    std::vector<CfgBlock> blocks;
+    bool truncated = false;
+};
+
+// Builds the control-flow graph of the function containing address. Requires
+// active debugging. blocks is sorted by start address; truncated is set when
+// kMaxCfgBlocks was reached.
+bool AnalyzeFunctionGraph(unsigned long long address, FunctionGraph& out, std::string& error);
+
 // Upper limit on the number of symbols returned by a single ListSymbols call:
 // large system modules can have tens of thousands, and a full list would
 // flood the model's context.

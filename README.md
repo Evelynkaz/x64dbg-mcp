@@ -7,7 +7,7 @@ An MCP server for the [x64dbg](https://x64dbg.com/) debugger. It gives an AI age
 ## What it can do
 
 - Inspect the debugger state: whether a session exists, running or paused, process and thread IDs, pointer size, current instruction pointer.
-- Read raw memory, disassemble code, and read strings, all with human-readable formatting alongside the structured data, and dump a memory region straight to a file for offline analysis.
+- Read raw memory, disassemble code, and read strings, all with human-readable formatting alongside the structured data, dump a memory region straight to a file for offline analysis, and build a function's control-flow graph to untangle obfuscated and virtualized code.
 - List running processes and attach the debugger to one already running, then detach again leaving it untouched.
 - Control execution: run, pause, stop, restart, run to an address, step into/over/out, and run until the program's own code is reached again.
 - Set, manage, and list breakpoints, software, hardware, and memory, with conditions and logging.
@@ -132,6 +132,7 @@ Inspecting data, instructions, and the current call context without changing any
 | `read_memory` | Reads raw bytes from the debuggee memory, up to 1 MiB per call, with a hex dump. |
 | `disassemble` | Disassembles up to 256 instructions starting at an address, with symbols already resolved. |
 | `disassemble_function` | Disassembles an entire function, using the debugger's own analysis of its boundaries. |
+| `function_graph` | The control-flow graph of a function: its basic blocks and the branches between them, for untangling obfuscated and virtualized control flow. |
 | `read_string` | Reads the string at a memory address, ASCII or UTF-16, decoded the way the debugger would show it. |
 | `read_stack` | Reads machine words from the top of the stack together with the debugger's annotations for them. |
 | `call_stack` | Reconstructs the chain of calls that led to the current instruction, with return addresses and resolved symbols. |
@@ -309,7 +310,7 @@ The C runtime is linked statically, so there is nothing extra to redistribute al
 
 ## Limitations
 
-Not implemented yet: a function's control-flow graph, and configuring the log text and condition used during tracing. A handful of convenience tools that would bundle several existing calls into one — a post-halt snapshot, a one-call function breakdown, searching for immediate values, and a registers diff — are also planned but not built. Deliberately out of scope for now: working with types and structures, graphical interaction, managing x64dbg windows, and source-level debugging. See `docs/tools.md` for the full roadmap.
+Not implemented yet: configuring the log text and condition used during tracing. A handful of convenience tools that would bundle several existing calls into one — a post-halt snapshot, a one-call function breakdown, searching for immediate values, and a registers diff — are also planned but not built. Deliberately out of scope for now: working with types and structures, graphical interaction, managing x64dbg windows, and source-level debugging. See `docs/tools.md` for the full roadmap.
 
 ## License
 

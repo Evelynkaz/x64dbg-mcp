@@ -1959,6 +1959,68 @@ bool GetFunctionRange(unsigned long long address, unsigned long long& start, uns
     }
 }
 
+bool AnalyzeFunctionGraph(unsigned long long address, FunctionGraph& out, std::string& error)
+{
+    out = FunctionGraph{};
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        BridgeCFGraphList graphList{};
+        if (!DbgAnalyzeFunction(static_cast<duint>(address), &graphList))
+        {
+            error = "Failed to analyze the function at the given address: it may not be "
+                    "inside a recognized function, or the module has not been analyzed yet "
+                    "(try running \"analyse\" or \"analxrefs\" via execute_command)";
+            return false;
+        }
+
+        // Parses the flat bridge list into node objects and, with freedata ==
+        // true, frees all bridge-allocated memory (the node list itself and
+        // every node's exits/instrs lists) right here.
+        BridgeCFGraph graph(&graphList, true);
+
+        out.entryPoint = static_cast<unsigned long long>(graph.entryPoint);
+
+        std::vector<CfgBlock> blocks;
+        blocks.reserve(graph.nodes.size() < kMaxCfgBlocks ? graph.nodes.size() : kMaxCfgBlocks);
+        for (const auto& nodeIt : graph.nodes)
+        {
+            if (blocks.size() >= kMaxCfgBlocks)
+            {
+                out.truncated = true;
+                break;
+            }
+            const BridgeCFNode& node = nodeIt.second;
+            CfgBlock block;
+            block.start = static_cast<unsigned long long>(node.start);
+            block.end = static_cast<unsigned long long>(node.end);
+            block.brTrue = static_cast<unsigned long long>(node.brtrue);
+            block.brFalse = static_cast<unsigned long long>(node.brfalse);
+            block.instructionCount = static_cast<unsigned int>(node.icount);
+            block.terminal = node.terminal;
+            block.split = node.split;
+            block.indirectCall = node.indirectcall;
+            block.exits.reserve(node.exits.size());
+            for (duint exit : node.exits)
+                block.exits.push_back(static_cast<unsigned long long>(exit));
+            blocks.push_back(std::move(block));
+        }
+
+        std::sort(blocks.begin(), blocks.end(),
+                  [](const CfgBlock& a, const CfgBlock& b) { return a.start < b.start; });
+        out.blocks = std::move(blocks);
+        return true;
+    }
+    catch (...)
+    {
+        out = FunctionGraph{};
+        error = "Internal error while analyzing the function's control-flow graph";
+        return false;
+    }
+}
+
 bool ListSymbols(unsigned long long moduleAddress, const std::string& filter,
                  size_t maxResults, std::vector<SymbolEntry>& out, bool& truncated,
                  std::string& error)

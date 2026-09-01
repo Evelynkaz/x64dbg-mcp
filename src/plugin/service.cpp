@@ -1186,6 +1186,55 @@ std::string HandleFunctionDisasm(DebuggerWorker& worker, const nlohmann::json& i
     return BuildOkResponse(id, result);
 }
 
+struct FunctionGraphOutcome
+{
+    bool ok = false;
+    FunctionGraph graph;
+    std::string error;
+};
+
+std::string HandleFunctionGraph(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    unsigned long long address = 0;
+    std::string paramError;
+    if (!GetUint64Param(params, "address", address, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<FunctionGraphOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, address] { outcome->ok = AnalyzeFunctionGraph(address, outcome->graph, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json blocks = nlohmann::json::array();
+    for (const auto& block : outcome->graph.blocks)
+    {
+        nlohmann::json item;
+        item["start"] = block.start;
+        item["end"] = block.end;
+        item["brTrue"] = block.brTrue;
+        item["brFalse"] = block.brFalse;
+        item["instructionCount"] = block.instructionCount;
+        item["terminal"] = block.terminal;
+        item["split"] = block.split;
+        item["indirectCall"] = block.indirectCall;
+        item["exits"] = block.exits;
+        blocks.push_back(std::move(item));
+    }
+
+    nlohmann::json result;
+    result["entryPoint"] = outcome->graph.entryPoint;
+    result["blocks"] = blocks;
+    result["truncated"] = outcome->graph.truncated;
+    return BuildOkResponse(id, result);
+}
+
 struct ListSymbolsOutcome
 {
     bool ok = false;
@@ -2462,6 +2511,8 @@ std::string McpService::HandleRequest(const std::string& request)
         return HandleXrefsGet(worker_, id, params);
     if (method == "function.disasm")
         return HandleFunctionDisasm(worker_, id, params);
+    if (method == "function.graph")
+        return HandleFunctionGraph(worker_, id, params);
     if (method == "command.exec")
         return HandleCommandExec(worker_, id, params);
     if (method == "script.run")
