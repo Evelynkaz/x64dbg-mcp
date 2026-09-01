@@ -1,5 +1,6 @@
 #include "bridge/mcp_server.h"
 #include "bridge/plugin_link.h"
+#include "bridge/resource_registry.h"
 #include "bridge/tool_registry.h"
 #include "common/pipe_server.h"
 #include "doctest/doctest.h"
@@ -7,15 +8,19 @@
 
 #include <atomic>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 using x64dbg_mcp::PipeServer;
 using x64dbg_mcp::bridge::CreateDefaultRegistry;
+using x64dbg_mcp::bridge::CreateDefaultResourceRegistry;
 using x64dbg_mcp::bridge::kLegacyVersions;
 using x64dbg_mcp::bridge::kModernVersion;
 using x64dbg_mcp::bridge::McpServer;
 using x64dbg_mcp::bridge::PluginLink;
+using x64dbg_mcp::bridge::Resource;
+using x64dbg_mcp::bridge::ResourceRegistry;
 using x64dbg_mcp::bridge::Tool;
 using x64dbg_mcp::bridge::ToolRegistry;
 using x64dbg_mcp::bridge::ToolResult;
@@ -34,10 +39,13 @@ std::string MakeMcpTestPipeName()
 }
 
 // A fresh server per test: HandleMessage keeps no state between calls,
-// but it's easier to read scenarios in isolation this way.
+// but it's easier to read scenarios in isolation this way. Includes the
+// default resources (no link, so reads explain there is no connection
+// rather than failing) so resources/list and resources/read tests have
+// real, known uris to exercise.
 McpServer MakeServer()
 {
-    return McpServer(CreateDefaultRegistry());
+    return McpServer(CreateDefaultRegistry(), CreateDefaultResourceRegistry());
 }
 
 json Parse(const std::string& response)
@@ -643,4 +651,186 @@ TEST_CASE("mcp: clientCapabilities not an object -> error -32602") {
 
     const json msg = Parse(*response);
     CHECK(msg["error"]["code"] == -32602);
+}
+
+// ---- Resources ----
+
+TEST_CASE("mcp: resources/list in the legacy model returns the registered resources with all fields") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":50,"method":"resources/list","params":{}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    REQUIRE(msg["result"]["resources"].is_array());
+    REQUIRE_FALSE(msg["result"]["resources"].empty());
+    // The legacy model does not wrap the result in the modern envelope.
+    CHECK_FALSE(msg["result"].contains("resultType"));
+
+    const json& first = msg["result"]["resources"][0];
+    CHECK(first.contains("uri"));
+    CHECK(first.contains("name"));
+    CHECK(first.contains("title"));
+    CHECK(first.contains("description"));
+    CHECK(first.contains("mimeType"));
+}
+
+TEST_CASE("mcp: resources/list in the modern model contains resultType complete") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":51,"method":"resources/list",
+        "params":{"_meta":{
+            "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities":{}}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK(msg["result"]["resultType"] == "complete");
+    REQUIRE(msg["result"]["resources"].is_array());
+    REQUIRE_FALSE(msg["result"]["resources"].empty());
+}
+
+TEST_CASE("mcp: resources/read returns content for a known uri in the legacy model") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":52,"method":"resources/read",
+        "params":{"uri":"x64dbg://memory-map"}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    REQUIRE(msg["result"]["contents"].is_array());
+    REQUIRE(msg["result"]["contents"].size() == 1);
+    CHECK(msg["result"]["contents"][0]["uri"] == "x64dbg://memory-map");
+    CHECK(msg["result"]["contents"][0]["mimeType"] == "text/plain");
+    CHECK_FALSE(msg["result"]["contents"][0]["text"].get<std::string>().empty());
+}
+
+TEST_CASE("mcp: resources/read returns content for a known uri in the modern model") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":53,"method":"resources/read",
+        "params":{"uri":"x64dbg://disassembly/current",
+        "_meta":{
+            "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities":{}}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK(msg["result"]["resultType"] == "complete");
+    REQUIRE(msg["result"]["contents"].is_array());
+    CHECK(msg["result"]["contents"][0]["uri"] == "x64dbg://disassembly/current");
+    CHECK_FALSE(msg["result"]["contents"][0]["text"].get<std::string>().empty());
+}
+
+TEST_CASE("mcp: resources/read for an unknown uri -> error -32002") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":54,"method":"resources/read",
+        "params":{"uri":"x64dbg://no-such-resource"}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK_FALSE(msg.contains("result"));
+    CHECK(msg["error"]["code"] == -32002);
+}
+
+TEST_CASE("mcp: resources/read without params.uri -> error -32602") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":55,"method":"resources/read","params":{}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK(msg["error"]["code"] == -32602);
+}
+
+TEST_CASE("mcp: resources/read with a non-string uri -> error -32602") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":56,"method":"resources/read","params":{"uri":42}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK(msg["error"]["code"] == -32602);
+}
+
+// A resource read failure is content, not a protocol error: the model must
+// see a clear explanation instead of a broken server, and no exception may
+// escape HandleMessage.
+TEST_CASE("mcp: resources/read for a resource whose read function throws returns a successful, explanatory result") {
+    ResourceRegistry resources;
+    Resource resource;
+    resource.uri = "x64dbg://broken";
+    resource.name = "broken";
+    resource.title = "Broken resource";
+    resource.description = "test resource";
+    resource.mimeType = "text/plain";
+    resource.read = []() -> std::string { throw std::runtime_error("boom"); };
+    resources.Add(std::move(resource));
+
+    McpServer server(ToolRegistry(), std::move(resources));
+    const std::string request = R"({"jsonrpc":"2.0","id":57,"method":"resources/read",
+        "params":{"uri":"x64dbg://broken"}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    CHECK_FALSE(msg.contains("error"));
+    REQUIRE(msg.contains("result"));
+    const std::string text = msg["result"]["contents"][0]["text"].get<std::string>();
+    CHECK(text.find("boom") != std::string::npos);
+}
+
+// The regression test for the running server having advertised the
+// 'resources' capability while main.cpp passed an empty registry to
+// McpServer: CreateDefaultResourceRegistry must actually register all
+// three resources, not just be reachable from tests that build their own
+// registry.
+TEST_CASE("mcp: CreateDefaultResourceRegistry registers all three resources") {
+    ResourceRegistry resources = CreateDefaultResourceRegistry();
+
+    CHECK(resources.Find("x64dbg://commands") != nullptr);
+    CHECK(resources.Find("x64dbg://memory-map") != nullptr);
+    CHECK(resources.Find("x64dbg://disassembly/current") != nullptr);
+
+    const Resource* commands = resources.Find("x64dbg://commands");
+    REQUIRE(commands != nullptr);
+    const std::string text = commands->read();
+    CHECK_FALSE(text.empty());
+    CHECK(text.find("run") != std::string::npos);
+    CHECK(text.find("HEX by default") != std::string::npos);
+}
+
+TEST_CASE("mcp: initialize capabilities include resources") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":58,"method":"initialize",
+        "params":{"protocolVersion":"2025-11-25","capabilities":{}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    REQUIRE(msg["result"]["capabilities"].contains("resources"));
+}
+
+TEST_CASE("mcp: server/discover capabilities include resources") {
+    McpServer server = MakeServer();
+    const std::string request = R"({"jsonrpc":"2.0","id":"d2","method":"server/discover",
+        "params":{"_meta":{
+            "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities":{}}}})";
+
+    auto response = server.HandleMessage(request);
+    REQUIRE(response.has_value());
+
+    const json msg = Parse(*response);
+    REQUIRE(msg["result"]["capabilities"].contains("resources"));
 }

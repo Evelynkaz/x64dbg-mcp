@@ -236,6 +236,16 @@ What the debuggee has opened outside its own memory: kernel objects, windows, an
 | `list_connections` | Lists the debuggee's active TCP connections. |
 | `seh_chain` | Shows the chain of structured exception handlers registered for the current thread. |
 
+## Resources
+
+Beyond tools, the server exposes MCP resources: static or read-only data a client can pin into its context once, instead of spending a tool call to fetch it on every request.
+
+| URI | What it contains |
+|---|---|
+| `x64dbg://commands` | Every command the debugger accepts, with aliases and whether each requires an active debugging session. |
+| `x64dbg://memory-map` | The debuggee's memory regions. |
+| `x64dbg://disassembly/current` | Disassembly at the current instruction. |
+
 ## Security and risks
 
 This server gives the model full access to the debugger: reading memory, controlling execution, setting breakpoints, and, just as much, writing to the debuggee — patching memory, assembling instructions, changing registers, and running arbitrary x64dbg commands and scripts in the debuggee's own context. It can also attach to a process the user did not start from x64dbg, allocate executable memory inside a process, and write regions of process memory to files on disk. Please read this before pointing it at anything important:
@@ -288,7 +298,7 @@ The C runtime is linked statically, so there is nothing extra to redistribute al
 
 ## Limitations
 
-Not implemented yet: MCP resources and prompts (the disassembly and memory-map resources, the x64dbg command reference resource, and the scenario prompts described in `docs/tools.md`), a function's control-flow graph, and configuring the log text and condition used during tracing. A handful of convenience tools that would bundle several existing calls into one — a post-halt snapshot, a one-call function breakdown, searching for immediate values, and a registers diff — are also planned but not built. Deliberately out of scope for now: working with types and structures, graphical interaction, managing x64dbg windows, and source-level debugging. See `docs/tools.md` for the full roadmap.
+Not implemented yet: MCP prompts (the scenario prompts described in `docs/tools.md`), a function's control-flow graph, and configuring the log text and condition used during tracing. A handful of convenience tools that would bundle several existing calls into one — a post-halt snapshot, a one-call function breakdown, searching for immediate values, and a registers diff — are also planned but not built. Deliberately out of scope for now: working with types and structures, graphical interaction, managing x64dbg windows, and source-level debugging. See `docs/tools.md` for the full roadmap.
 
 ## License
 

@@ -1,4 +1,5 @@
 #include "bridge/debugger_tools.h"
+#include "bridge/x64dbg_commands.inc"
 
 #include <algorithm>
 #include <cctype>
@@ -4220,6 +4221,80 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(dumpMemory));
+}
+
+void RegisterDebuggerResources(ResourceRegistry& registry, std::shared_ptr<PluginLink> link)
+{
+    Resource memoryMap;
+    memoryMap.uri = "x64dbg://memory-map";
+    memoryMap.name = "memory_map";
+    memoryMap.title = "Memory map";
+    memoryMap.description =
+        "The debuggee's memory regions with their base address, size, "
+        "state, type, and access protection, formatted the same way as "
+        "the memory_map tool. Empty when nothing is currently being "
+        "debugged.";
+    memoryMap.mimeType = "text/plain";
+    memoryMap.read = [link]() -> std::string
+    {
+        if (!link)
+            return "No connection to the x64dbg-mcp plugin. Start x64dbg with the "
+                   "x64dbg-mcp plugin installed to see the memory map.";
+
+        const nlohmann::json result = link->Call("memory.map", nlohmann::json::object());
+        const nlohmann::json regions = result.value("regions", nlohmann::json::array());
+        return FormatMemoryMap(regions);
+    };
+    registry.Add(std::move(memoryMap));
+
+    Resource currentDisassembly;
+    currentDisassembly.uri = "x64dbg://disassembly/current";
+    currentDisassembly.name = "current_disassembly";
+    currentDisassembly.title = "Disassembly at the current instruction";
+    currentDisassembly.description =
+        "Disassembly of the 32 instructions starting at the current "
+        "instruction pointer, formatted the same way as the disassemble "
+        "tool. Explains instead of failing when there is no debugging "
+        "session or the process is currently running.";
+    currentDisassembly.mimeType = "text/plain";
+    currentDisassembly.read = [link]() -> std::string
+    {
+        if (!link)
+            return "No connection to the x64dbg-mcp plugin. Start x64dbg with the "
+                   "x64dbg-mcp plugin installed to see the current disassembly.";
+
+        const nlohmann::json status = link->Call("debugger.status", nlohmann::json::object());
+        if (!status.value("debugging", false))
+            return "Not debugging. Open or attach to a process in x64dbg to see the current disassembly.";
+        if (status.value("running", false))
+            return "The process is running. Pause it to disassemble at the current instruction pointer.";
+
+        const std::uint64_t cip = status.value("cip", 0ULL);
+        const nlohmann::json instructions = link->Call("disasm", {
+            {"address", cip},
+            {"count", 32}
+        });
+        return FormatDisasmListing(instructions);
+    };
+    registry.Add(std::move(currentDisassembly));
+
+    Resource commandReference;
+    commandReference.uri = "x64dbg://commands";
+    commandReference.name = "x64dbg_commands";
+    commandReference.title = "x64dbg command reference";
+    commandReference.description =
+        "Every command the debugger accepts, generated from x64dbg's own "
+        "command registrations: primary name, aliases, and whether it "
+        "requires an active debugging session. Look up a command and its "
+        "argument syntax here instead of guessing it. Static and compiled "
+        "into the server, so it is available even when nothing is being "
+        "debugged.";
+    commandReference.mimeType = "text/plain";
+    commandReference.read = []() -> std::string
+    {
+        return kX64dbgCommandReference;
+    };
+    registry.Add(std::move(commandReference));
 }
 
 } // namespace x64dbg_mcp::bridge

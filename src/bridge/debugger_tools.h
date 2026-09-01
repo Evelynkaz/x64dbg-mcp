@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bridge/plugin_link.h"
+#include "bridge/resource_registry.h"
 #include "bridge/tool_registry.h"
 
 #include <memory>
@@ -23,5 +24,11 @@ namespace x64dbg_mcp::bridge
 // registered separately in tool_registry.cpp, the server exposes
 // forty-six tools to the model.
 void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> link);
+
+// Registers the debugger's resources: x64dbg://memory-map and
+// x64dbg://disassembly/current, which reuse the formatting helper and the
+// plugin method of the equivalent tool, and the static x64dbg://commands
+// command reference, which needs no plugin call. link may be empty (nullptr).
+void RegisterDebuggerResources(ResourceRegistry& registry, std::shared_ptr<PluginLink> link);
 
 } // namespace x64dbg_mcp::bridge

@@ -109,6 +109,16 @@ nlohmann::json BuildServerInfo()
     return nlohmann::json{ {"name", "x64dbg-mcp"}, {"version", SERVER_VERSION_STR} };
 }
 
+// Capabilities advertised both by the legacy initialize handshake and by
+// the modern server/discover — kept in one place so the two can't drift apart.
+nlohmann::json BuildCapabilities()
+{
+    return nlohmann::json{
+        {"tools", nlohmann::json::object()},
+        {"resources", {{"subscribe", false}, {"listChanged", false}}}
+    };
+}
+
 // Extracts the _meta object from params if it is present and is actually an
 // object; otherwise returns an empty object. Kept as a separate function so
 // the same type check isn't repeated in several places.
@@ -165,7 +175,8 @@ bool IsModernProtocol(const std::string& method, const nlohmann::json& params)
 
 } // namespace
 
-McpServer::McpServer(ToolRegistry registry) : registry_(std::move(registry))
+McpServer::McpServer(ToolRegistry registry, ResourceRegistry resources)
+    : registry_(std::move(registry)), resources_(std::move(resources))
 {
 }
 
@@ -234,11 +245,54 @@ nlohmann::json McpServer::HandleToolsCall(const nlohmann::json& params) const
     }
 }
 
+nlohmann::json McpServer::HandleResourcesList() const
+{
+    return nlohmann::json{ {"resources", resources_.ListJson()} };
+}
+
+nlohmann::json McpServer::HandleResourcesRead(const nlohmann::json& params) const
+{
+    // A malformed request per the MCP specification's classification is a
+    // protocol error, not a resource read result.
+    if (!params.is_object() || !params.contains("uri") || !params["uri"].is_string())
+        throw ProtocolError{ -32602, "params.uri must be present and must be a string containing the resource uri" };
+
+    const std::string uri = params["uri"].get<std::string>();
+
+    const Resource* resource = resources_.Find(uri);
+    if (resource == nullptr)
+        throw ProtocolError{ -32002, "Resource not found: " + uri };
+
+    // A resource whose read fails at runtime (e.g. no debugging session) is
+    // not a protocol error: the client still gets a successful read whose
+    // text explains what is unavailable and why, rather than a broken
+    // server. No exception may escape from here.
+    std::string text;
+    try
+    {
+        text = resource->read();
+    }
+    catch (const std::exception& e)
+    {
+        text = std::string("Failed to read resource ") + uri + ": " + e.what();
+    }
+    catch (...)
+    {
+        text = "Failed to read resource " + uri + ": internal error";
+    }
+
+    return nlohmann::json{
+        {"contents", nlohmann::json::array({
+            { {"uri", uri}, {"mimeType", resource->mimeType}, {"text", text} }
+        })}
+    };
+}
+
 nlohmann::json McpServer::HandleDiscover() const
 {
     nlohmann::json result = {
         {"supportedVersions", nlohmann::json::array({ kModernVersion })},
-        {"capabilities", {{"tools", nlohmann::json::object()}}},
+        {"capabilities", BuildCapabilities()},
         {"instructions",
             "This server provides access to the x64dbg debugger for reverse "
             "engineering: process inspection, breakpoints, disassembly, and "
@@ -352,6 +406,8 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
                 result = HandleDiscover();
             else if (method == "tools/list")
                 result = HandleToolsList();
+            else if (method == "resources/list")
+                result = HandleResourcesList();
             else if (method == "ping")
                 result = nlohmann::json::object();
             else if (method == "tools/call")
@@ -359,6 +415,17 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
                 try
                 {
                     result = HandleToolsCall(params);
+                }
+                catch (const ProtocolError& e)
+                {
+                    return MakeErrorResponse(id, e.code, e.message).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+                }
+            }
+            else if (method == "resources/read")
+            {
+                try
+                {
+                    result = HandleResourcesRead(params);
                 }
                 catch (const ProtocolError& e)
                 {
@@ -394,7 +461,7 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
 
             const nlohmann::json result = {
                 {"protocolVersion", negotiated},
-                {"capabilities", {{"tools", nlohmann::json::object()}}},
+                {"capabilities", BuildCapabilities()},
                 {"serverInfo", BuildServerInfo()}
             };
             return MakeResultResponse(id, result).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
@@ -402,6 +469,9 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
 
         if (method == "tools/list")
             return MakeResultResponse(id, HandleToolsList()).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+
+        if (method == "resources/list")
+            return MakeResultResponse(id, HandleResourcesList()).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
         if (method == "ping")
             return MakeResultResponse(id, nlohmann::json::object()).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
@@ -411,6 +481,18 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
             try
             {
                 return MakeResultResponse(id, HandleToolsCall(params)).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+            }
+            catch (const ProtocolError& e)
+            {
+                return MakeErrorResponse(id, e.code, e.message).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+            }
+        }
+
+        if (method == "resources/read")
+        {
+            try
+            {
+                return MakeResultResponse(id, HandleResourcesRead(params)).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
             }
             catch (const ProtocolError& e)
             {

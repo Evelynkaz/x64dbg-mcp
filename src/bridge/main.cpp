@@ -88,7 +88,7 @@ int main(int argc, char** argv)
         SetLogLevel(level);
 
         auto link = std::make_shared<PluginLink>(pipeName);
-        McpServer server(CreateDefaultRegistry(link));
+        McpServer server(CreateDefaultRegistry(link), CreateDefaultResourceRegistry(link));
         RunStdioLoop(server);
         return 0;
     }
