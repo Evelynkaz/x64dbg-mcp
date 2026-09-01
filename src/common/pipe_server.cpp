@@ -73,6 +73,14 @@ constexpr DWORD kPipeMaxInstances = kMaxConcurrentConnections + 1;
 // stay long enough to never interrupt an idle but genuinely live client.
 constexpr DWORD kIdleTimeoutMs = 10 * 60 * 1000;
 
+// How long the pre-handshake read may wait for the client's version frame.
+// A real client sends it within milliseconds of connecting, so this is far
+// shorter than kIdleTimeoutMs: a peer that connects and never completes the
+// handshake must not be able to pin a connection slot for the whole idle
+// timeout, let alone forever (see the review's defect: 8 such peers exhaust
+// kMaxConcurrentConnections and lock out the real client).
+constexpr DWORD kHandshakeTimeoutMs = 10000;
+
 // Field names of the protocol version handshake frame — a private contract
 // between PipeServer and PipeClient (see defect 3 in the review). This is
 // not part of the public ipc_protocol.h, so it is defined here and
@@ -143,7 +151,7 @@ IoResult ReadBytes(HANDLE hPipe, HANDLE stopEvent, char* buffer, DWORD size, DWO
     return result;
 }
 
-IoResult WriteBytes(HANDLE hPipe, HANDLE stopEvent, const char* data, DWORD size, DWORD& transferred)
+IoResult WriteBytes(HANDLE hPipe, HANDLE stopEvent, const char* data, DWORD size, DWORD& transferred, DWORD timeoutMs)
 {
     OVERLAPPED ov{};
     ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
@@ -160,7 +168,7 @@ IoResult WriteBytes(HANDLE hPipe, HANDLE stopEvent, const char* data, DWORD size
         const DWORD err = GetLastError();
         if (err == ERROR_IO_PENDING)
         {
-            result = WaitIoCompletion(hPipe, stopEvent, ov, transferred, INFINITE);
+            result = WaitIoCompletion(hPipe, stopEvent, ov, transferred, timeoutMs);
         }
         else if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED)
         {
@@ -176,7 +184,7 @@ IoResult WriteBytes(HANDLE hPipe, HANDLE stopEvent, const char* data, DWORD size
     return result;
 }
 
-bool WriteAll(HANDLE hPipe, HANDLE stopEvent, const std::string& data)
+bool WriteAll(HANDLE hPipe, HANDLE stopEvent, const std::string& data, DWORD timeoutMs)
 {
     size_t totalWritten = 0;
     while (totalWritten < data.size())
@@ -185,7 +193,10 @@ bool WriteAll(HANDLE hPipe, HANDLE stopEvent, const std::string& data)
         const size_t remaining = data.size() - totalWritten;
         const DWORD toWrite = static_cast<DWORD>((remaining > 0xFFFFFFFFu) ? 0xFFFFFFFFu : remaining);
 
-        if (WriteBytes(hPipe, stopEvent, data.data() + totalWritten, toWrite, chunkWritten) != IoResult::Ok)
+        // A TimedOut result (or any other non-Ok result) is treated the same
+        // as a disconnect below by every caller — the connection is closed,
+        // consistent with how the read path treats an idle timeout.
+        if (WriteBytes(hPipe, stopEvent, data.data() + totalWritten, toWrite, chunkWritten, timeoutMs) != IoResult::Ok)
             return false;
 
         if (chunkWritten == 0)
@@ -331,7 +342,11 @@ bool PerformHandshake(HANDLE hPipe, HANDLE stopEvent, FrameReader& reader, std::
     while (!reader.Next(payload))
     {
         DWORD bytesRead = 0;
-        if (ReadBytes(hPipe, stopEvent, readBuf.data(), static_cast<DWORD>(readBuf.size()), bytesRead) != IoResult::Ok)
+        // Bounded handshake timeout (kHandshakeTimeoutMs): without it, a peer
+        // that connects and never sends its version frame pins this
+        // connection thread forever, since the idle reaper never runs on an
+        // in-progress read.
+        if (ReadBytes(hPipe, stopEvent, readBuf.data(), static_cast<DWORD>(readBuf.size()), bytesRead, kHandshakeTimeoutMs) != IoResult::Ok)
             return false;
 
         if (bytesRead == 0)
@@ -362,7 +377,7 @@ bool PerformHandshake(HANDLE hPipe, HANDLE stopEvent, FrameReader& reader, std::
     std::string frame;
     if (!EncodeFrame(response.dump(), frame))
         return false;
-    if (!WriteAll(hPipe, stopEvent, frame))
+    if (!WriteAll(hPipe, stopEvent, frame, kHandshakeTimeoutMs))
         return false;
 
     return clientMajor == ipc::kProtocolVersionMajor;
@@ -386,7 +401,12 @@ void ServeConnection(HANDLE hPipe, HANDLE stopEvent, const std::function<std::st
             if (!EncodeFrame(responseBody, frame))
                 return false; // the response did not fit in a frame — the connection has to be closed
 
-            if (!WriteAll(hPipe, stopEvent, frame))
+            // Bounded with kIdleTimeoutMs (the same bound the post-handshake
+            // read uses): a client that stops reading must not be able to
+            // pin this thread in WriteFile forever once the response is
+            // larger than the pipe's buffer. A TimedOut result is treated
+            // the same as a disconnect by the false return below.
+            if (!WriteAll(hPipe, stopEvent, frame, kIdleTimeoutMs))
                 return false;
         }
         return true;

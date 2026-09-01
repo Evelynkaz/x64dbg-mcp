@@ -354,16 +354,6 @@ nlohmann::json McpServer::HandleDiscover() const
 
 std::optional<std::string> McpServer::HandleMessage(const std::string& line)
 {
-    // Reject the input BEFORE parsing JSON: recursively parsing a deeply
-    // nested or excessively large structure can overflow the stack or
-    // memory before parsing reports an error — this has to be checked on
-    // the raw text, we cannot rely on the parser itself here.
-    if (line.size() > kMaxMessageBytes)
-        return MakeErrorResponse(nullptr, -32600, "Invalid Request: message too large").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
-
-    if (ComputeMaxNestingDepth(line) > kMaxNestingDepth)
-        return MakeErrorResponse(nullptr, -32600, "Invalid Request: message nesting too deep").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
-
     // The request id is declared before the try block and used in the outer
     // catch — otherwise a -32603 error with an already-parsed id would go
     // out with id: null, and the client wouldn't be able to match the
@@ -374,9 +364,21 @@ std::optional<std::string> McpServer::HandleMessage(const std::string& line)
     // HandleMessage. nlohmann::json throws when accessing missing or
     // type-mismatched fields, so we catch anything that might have slipped
     // past the explicit checks below — this way the method is guaranteed
-    // not to propagate an exception outward.
+    // not to propagate an exception outward. The size and nesting guards
+    // below also live inside this try: MakeErrorResponse(...).dump(...) can
+    // in principle throw (e.g. std::bad_alloc), and that must be caught too.
     try
     {
+        // Reject the input BEFORE parsing JSON: recursively parsing a deeply
+        // nested or excessively large structure can overflow the stack or
+        // memory before parsing reports an error — this has to be checked on
+        // the raw text, we cannot rely on the parser itself here.
+        if (line.size() > kMaxMessageBytes)
+            return MakeErrorResponse(nullptr, -32600, "Invalid Request: message too large").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+
+        if (ComputeMaxNestingDepth(line) > kMaxNestingDepth)
+            return MakeErrorResponse(nullptr, -32600, "Invalid Request: message nesting too deep").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+
         const nlohmann::json msg = nlohmann::json::parse(line, nullptr, false);
         if (msg.is_discarded())
             return MakeErrorResponse(nullptr, -32700, "Parse error").dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);

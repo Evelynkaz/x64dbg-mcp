@@ -653,6 +653,11 @@ bool FetchPatchList(std::vector<DBGPATCHINFO>& out, std::string& error)
 {
     out.clear();
     auto* functions = DbgFunctions();
+    if (!functions || !functions->PatchEnum)
+    {
+        error = "Patch listing is not supported by this x64dbg build";
+        return false;
+    }
 
     size_t byteSize = 0;
     if (!functions->PatchEnum(nullptr, &byteSize))
@@ -1074,7 +1079,7 @@ bool SetBreakpoint(const nlohmann::json& params, std::string& error)
             bpType = bp_normal;
             cmd = "SetBPX " + FormatHexAddress(address);
             if (!name.empty())
-                cmd += ", \"" + name + "\"";
+                cmd += ", " + QuoteCommandArg(name);
         }
         else if (type == "hardware")
         {
@@ -1142,8 +1147,15 @@ bool SetBreakpoint(const nlohmann::json& params, std::string& error)
 
         // Additional settings are applied via separate commands to the
         // breakpoint that already exists, so it must first be located by address.
+        auto* bpFunctions = DbgFunctions();
+        if (!bpFunctions || !bpFunctions->BpRefVa || !bpFunctions->BpSetFieldText)
+        {
+            error = "Editing breakpoint attributes is not supported by this x64dbg build";
+            return false;
+        }
+
         BP_REF ref{};
-        if (!DbgFunctions()->BpRefVa(&ref, bpType, static_cast<duint>(address)))
+        if (!bpFunctions->BpRefVa(&ref, bpType, static_cast<duint>(address)))
         {
             error = "Breakpoint was created but could not be located afterwards to apply additional settings";
             return false;
@@ -1163,7 +1175,7 @@ bool SetBreakpoint(const nlohmann::json& params, std::string& error)
             return false;
         if (params.contains("condition"))
         {
-            const std::string cmd2 = "SetBreakpointCondition " + FormatHexAddress(address) + ", " + condition;
+            const std::string cmd2 = "SetBreakpointCondition " + FormatHexAddress(address) + ", " + QuoteCommandArg(condition);
             if (!DbgCmdExecDirect(cmd2.c_str()))
             {
                 error = "Failed to set the breakpoint condition";
@@ -1176,7 +1188,10 @@ bool SetBreakpoint(const nlohmann::json& params, std::string& error)
             return false;
         if (params.contains("log"))
         {
-            const std::string cmd2 = "SetBreakpointLog " + FormatHexAddress(address) + ", " + log;
+            // Log format strings routinely contain commas (e.g.
+            // "rax={rax}, rbx={rbx}"), and arguments are comma-separated, so
+            // an unquoted log text is silently truncated at the first comma.
+            const std::string cmd2 = "SetBreakpointLog " + FormatHexAddress(address) + ", " + QuoteCommandArg(log);
             if (!DbgCmdExecDirect(cmd2.c_str()))
             {
                 error = "Failed to set the breakpoint log text";
@@ -1189,7 +1204,7 @@ bool SetBreakpoint(const nlohmann::json& params, std::string& error)
             return false;
         if (params.contains("log_condition"))
         {
-            const std::string cmd2 = "SetBreakpointLogCondition " + FormatHexAddress(address) + ", " + logCondition;
+            const std::string cmd2 = "SetBreakpointLogCondition " + FormatHexAddress(address) + ", " + QuoteCommandArg(logCondition);
             if (!DbgCmdExecDirect(cmd2.c_str()))
             {
                 error = "Failed to set the breakpoint log condition";
@@ -1361,8 +1376,8 @@ bool ListModules(std::vector<ModuleEntry>& out, std::string& error)
             entry.size = static_cast<unsigned long long>(mod.size);
             entry.entry = static_cast<unsigned long long>(mod.entry);
             entry.sectionCount = mod.sectionCount;
-            entry.name = mod.name;
-            entry.path = mod.path;
+            entry.name.assign(mod.name, ::strnlen(mod.name, sizeof(mod.name)));
+            entry.path.assign(mod.path, ::strnlen(mod.path, sizeof(mod.path)));
             out.push_back(std::move(entry));
         }
         return true;
@@ -1401,8 +1416,8 @@ bool GetModuleDetails(const std::string& name, unsigned long long address, bool 
         out.module.size = static_cast<unsigned long long>(info.size);
         out.module.entry = static_cast<unsigned long long>(info.entry);
         out.module.sectionCount = info.sectionCount;
-        out.module.name = info.name;
-        out.module.path = info.path;
+        out.module.name.assign(info.name, ::strnlen(info.name, sizeof(info.name)));
+        out.module.path.assign(info.path, ::strnlen(info.path, sizeof(info.path)));
 
         // BridgeList cleans up and frees its own data in its destructor.
         BridgeList<Script::Module::ModuleSectionInfo> sections;
@@ -1414,7 +1429,7 @@ bool GetModuleDetails(const std::string& name, unsigned long long address, bool 
                 SectionEntry section;
                 section.address = static_cast<unsigned long long>(sections[i].addr);
                 section.size = static_cast<unsigned long long>(sections[i].size);
-                section.name = sections[i].name;
+                section.name.assign(sections[i].name, ::strnlen(sections[i].name, sizeof(sections[i].name)));
                 out.sections.push_back(std::move(section));
             }
         }
@@ -1435,8 +1450,8 @@ bool GetModuleDetails(const std::string& name, unsigned long long address, bool 
                     item.rva = static_cast<unsigned long long>(exports[i].rva);
                     item.va = static_cast<unsigned long long>(exports[i].va);
                     item.forwarded = exports[i].forwarded;
-                    item.name = exports[i].name;
-                    item.forwardName = exports[i].forwardName;
+                    item.name.assign(exports[i].name, ::strnlen(exports[i].name, sizeof(exports[i].name)));
+                    item.forwardName.assign(exports[i].forwardName, ::strnlen(exports[i].forwardName, sizeof(exports[i].forwardName)));
                     out.exports.push_back(std::move(item));
                 }
             }
@@ -1457,7 +1472,7 @@ bool GetModuleDetails(const std::string& name, unsigned long long address, bool 
                     item.iatRva = static_cast<unsigned long long>(imports[i].iatRva);
                     item.iatVa = static_cast<unsigned long long>(imports[i].iatVa);
                     item.ordinal = static_cast<unsigned long long>(imports[i].ordinal);
-                    item.name = imports[i].name;
+                    item.name.assign(imports[i].name, ::strnlen(imports[i].name, sizeof(imports[i].name)));
                     out.imports.push_back(std::move(item));
                 }
             }
@@ -1479,6 +1494,13 @@ bool GetMemoryMap(std::vector<MemoryRegion>& out, std::string& error)
     {
         if (!RequireDebugging(error))
             return false;
+
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->PageRightsToString)
+        {
+            error = "Retrieving page protection strings is not supported by this x64dbg build";
+            return false;
+        }
 
         MEMMAP memoryMap = {};
         if (!DbgMemMap(&memoryMap))
@@ -1509,10 +1531,10 @@ bool GetMemoryMap(std::vector<MemoryRegion>& out, std::string& error)
             region.type = MemTypeToString(page.mbi.Type);
 
             char rights[RIGHTS_STRING_SIZE] = {};
-            if (DbgFunctions()->PageRightsToString(page.mbi.Protect, rights))
+            if (functions->PageRightsToString(page.mbi.Protect, rights))
                 region.protect = rights;
 
-            region.info = page.info;
+            region.info.assign(page.info, ::strnlen(page.info, sizeof(page.info)));
             out.push_back(std::move(region));
         }
         return true;
@@ -1557,7 +1579,7 @@ bool ListThreads(std::vector<ThreadEntry>& out, std::string& error)
             entry.cip = static_cast<unsigned long long>(info.ThreadCip);
             entry.suspendCount = static_cast<unsigned int>(info.SuspendCount);
             entry.lastError = static_cast<unsigned int>(info.LastError);
-            entry.name = info.BasicInfo.threadName;
+            entry.name.assign(info.BasicInfo.threadName, ::strnlen(info.BasicInfo.threadName, sizeof(info.BasicInfo.threadName)));
             entry.priority = ThreadPriorityToString(info.Priority);
             entry.waitReason = ThreadWaitReasonToString(info.WaitReason);
             entry.current = (i == threadList.CurrentThread);
@@ -1657,10 +1679,17 @@ bool GetCallStack(unsigned int threadId, std::vector<CallStackFrame>& out, std::
         if (!RequirePaused("reading the call stack", error))
             return false;
 
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->GetCallStackEx || !functions->GetCallStackByThread)
+        {
+            error = "Reading the call stack is not supported by this x64dbg build";
+            return false;
+        }
+
         DBGCALLSTACK callstack = {};
         if (threadId == 0)
         {
-            DbgFunctions()->GetCallStackEx(&callstack, false);
+            functions->GetCallStackEx(&callstack, false);
         }
         else
         {
@@ -1689,7 +1718,7 @@ bool GetCallStack(unsigned int threadId, std::vector<CallStackFrame>& out, std::
                 return false;
             }
 
-            DbgFunctions()->GetCallStackByThread(handle, &callstack);
+            functions->GetCallStackByThread(handle, &callstack);
         }
 
         // GetCallStackEx/GetCallStackByThread allocate callstack.entries via
@@ -1709,7 +1738,7 @@ bool GetCallStack(unsigned int threadId, std::vector<CallStackFrame>& out, std::
             frame.address = static_cast<unsigned long long>(entry.addr);
             frame.from = static_cast<unsigned long long>(entry.from);
             frame.to = static_cast<unsigned long long>(entry.to);
-            frame.comment = entry.comment;
+            frame.comment.assign(entry.comment, ::strnlen(entry.comment, sizeof(entry.comment)));
             out.push_back(std::move(frame));
         }
         return true;
@@ -1756,7 +1785,7 @@ bool ReadStack(size_t count, std::vector<StackSlot>& out, std::string& error)
 
             STACK_COMMENT comment = {};
             if (DbgStackCommentGet(addr, &comment))
-                slot.comment = comment.comment;
+                slot.comment.assign(comment.comment, ::strnlen(comment.comment, sizeof(comment.comment)));
 
             out.push_back(std::move(slot));
         }
@@ -2423,9 +2452,21 @@ bool WriteMemory(unsigned long long address, const std::vector<unsigned char>& d
         // it undoable (RestorePatches) and exportable to a file
         // (ApplyPatchesToFile); DbgMemWrite writes the bytes directly, with
         // no such bookkeeping.
-        const bool ok = recordPatch
-            ? DbgFunctions()->MemPatch(addr, data.data(), static_cast<duint>(data.size()))
-            : DbgMemWrite(addr, data.data(), static_cast<duint>(data.size()));
+        bool ok;
+        if (recordPatch)
+        {
+            auto* functions = DbgFunctions();
+            if (!functions || !functions->MemPatch)
+            {
+                error = "Recording patches while writing memory is not supported by this x64dbg build";
+                return false;
+            }
+            ok = functions->MemPatch(addr, data.data(), static_cast<duint>(data.size()));
+        }
+        else
+        {
+            ok = DbgMemWrite(addr, data.data(), static_cast<duint>(data.size()));
+        }
         if (!ok)
         {
             error = "Failed to write memory at the given address";
@@ -2493,9 +2534,16 @@ bool AssembleAt(unsigned long long address, const std::string& instruction,
             return false;
         }
 
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->AssembleAtEx)
+        {
+            error = "Assembling instructions is not supported by this x64dbg build";
+            return false;
+        }
+
         const duint addr = static_cast<duint>(address);
         char errorBuf[MAX_ERROR_SIZE] = {};
-        if (!DbgFunctions()->AssembleAtEx(addr, instruction.c_str(), errorBuf, fillNop))
+        if (!functions->AssembleAtEx(addr, instruction.c_str(), errorBuf, fillNop))
         {
             // The assembler's own message explains exactly what is wrong
             // with the instruction text, so it is surfaced verbatim.
@@ -2537,7 +2585,7 @@ bool ListPatches(std::vector<PatchEntry>& out, std::string& error)
             entry.address = static_cast<unsigned long long>(patch.addr);
             entry.oldByte = patch.oldbyte;
             entry.newByte = patch.newbyte;
-            entry.module = patch.mod;
+            entry.module.assign(patch.mod, ::strnlen(patch.mod, sizeof(patch.mod)));
             out.push_back(std::move(entry));
         }
         return true;
@@ -2560,6 +2608,11 @@ bool RestorePatches(unsigned long long address, unsigned long long end, bool has
             return false;
 
         auto* functions = DbgFunctions();
+        if (!functions || !functions->PatchGetEx || !functions->PatchRestore || !functions->PatchRestoreRange)
+        {
+            error = "Restoring patches is not supported by this x64dbg build";
+            return false;
+        }
 
         if (!hasRange)
         {
@@ -2619,10 +2672,17 @@ bool ApplyPatchesToFile(const std::string& filePath, int& patched, std::string& 
         if (!FetchPatchList(patches, error))
             return false;
 
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->PatchFile)
+        {
+            error = "Applying patches to a file is not supported by this x64dbg build";
+            return false;
+        }
+
         // Writes a patched copy of the module to filePath; the running
         // process itself is not modified by this call.
         char errorBuf[MAX_ERROR_SIZE] = {};
-        const int result = DbgFunctions()->PatchFile(patches.data(), static_cast<int>(patches.size()),
+        const int result = functions->PatchFile(patches.data(), static_cast<int>(patches.size()),
             filePath.c_str(), errorBuf);
         if (result < 0)
         {
@@ -2653,7 +2713,14 @@ bool SetPageProtection(unsigned long long address, const std::string& rights, st
             return false;
         }
 
-        if (!DbgFunctions()->SetPageRights(static_cast<duint>(address), rights.c_str()))
+        auto* functions = DbgFunctions();
+        if (!functions || !functions->SetPageRights)
+        {
+            error = "Setting page protection is not supported by this x64dbg build";
+            return false;
+        }
+
+        if (!functions->SetPageRights(static_cast<duint>(address), rights.c_str()))
         {
             error = "Failed to set page rights to \"" + rights + "\": expected one of Execute, ExecuteRead, "
                     "ExecuteReadWrite, ExecuteWriteCopy, NoAccess, ReadOnly, ReadWrite, WriteCopy, optionally "
@@ -3156,11 +3223,11 @@ bool ListConnections(std::vector<ConnectionEntry>& out, bool& truncated, std::st
         {
             const TCPCONNECTIONINFO& info = connections[i];
             ConnectionEntry entry;
-            entry.remoteAddress = info.RemoteAddress;
+            entry.remoteAddress.assign(info.RemoteAddress, ::strnlen(info.RemoteAddress, sizeof(info.RemoteAddress)));
             entry.remotePort = info.RemotePort;
-            entry.localAddress = info.LocalAddress;
+            entry.localAddress.assign(info.LocalAddress, ::strnlen(info.LocalAddress, sizeof(info.LocalAddress)));
             entry.localPort = info.LocalPort;
-            entry.state = info.StateText;
+            entry.state.assign(info.StateText, ::strnlen(info.StateText, sizeof(info.StateText)));
             out.push_back(std::move(entry));
         }
         return true;

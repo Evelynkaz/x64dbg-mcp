@@ -42,10 +42,10 @@ bool DebuggerWorker::Start()
 
 void DebuggerWorker::Stop()
 {
-    std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
-
     if (std::this_thread::get_id() == workerThreadId_.load())
         return;  // Stop() from the worker thread: joining itself is impossible
+
+    std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
 
     if (!running_.load())
         return; // not running or already stopped — safe to no-op
