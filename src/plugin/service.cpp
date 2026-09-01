@@ -1861,6 +1861,49 @@ std::string HandleTraceRecord(DebuggerWorker& worker, const nlohmann::json& id, 
     return BuildOkResponse(id, ControlResultToJson(outcome->result));
 }
 
+struct TraceSetLogOutcome
+{
+    bool ok = false;
+    bool fileWithoutText = false;
+    std::string error;
+};
+
+std::string HandleTraceSetLog(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
+{
+    std::string paramError;
+    std::string text;
+    if (!GetOptionalStringParam(params, "text", "", text, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    std::string condition;
+    if (!GetOptionalStringParam(params, "condition", "", condition, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    std::string file;
+    if (!GetOptionalStringParam(params, "file", "", file, paramError))
+        return BuildErrorResponse(id, ipc::ErrorCode::InvalidArgument, paramError);
+
+    auto outcome = std::make_shared<TraceSetLogOutcome>();
+    const auto submitResult = worker.Submit(
+        [outcome, text, condition, file]
+        { outcome->ok = SetTraceLog(text, condition, file, outcome->fileWithoutText, outcome->error); },
+        kDefaultTimeoutMs);
+
+    ipc::ErrorCode code;
+    std::string message;
+    if (!TranslateSubmitResult(submitResult, code, message))
+        return BuildErrorResponse(id, code, message);
+    if (!outcome->ok)
+        return BuildErrorResponse(id, ipc::ErrorCode::OperationFailed, outcome->error);
+
+    nlohmann::json result;
+    result["cleared"] = text.empty();
+    result["hasCondition"] = !condition.empty();
+    result["file"] = file;
+    result["fileWithoutText"] = outcome->fileWithoutText;
+    return BuildOkResponse(id, result);
+}
+
 std::string HandleTraceRunToUserCode(DebuggerWorker& worker, const nlohmann::json& id, const nlohmann::json& params)
 {
     std::string paramError;
@@ -2539,6 +2582,8 @@ std::string McpService::HandleRequest(const std::string& request)
         return HandleTraceRecord(worker_, id, params);
     if (method == "trace.run_to_user_code")
         return HandleTraceRunToUserCode(worker_, id, params);
+    if (method == "trace.set_log")
+        return HandleTraceSetLog(worker_, id, params);
     if (method == "coverage.enable")
         return HandleCoverageEnable(worker_, id, params);
     if (method == "coverage.disable")

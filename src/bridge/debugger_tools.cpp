@@ -1034,6 +1034,31 @@ std::string FormatTraceRecordResult(const std::string& action, const std::string
     return out.str();
 }
 
+// Human-readable summary of trace.set_log: whether the log text was
+// cleared or set, whether a condition gates it, and the destination file
+// if any. Warns explicitly when a file was set without log text, since
+// the plugin's 'fileWithoutText' flag means the file will stay empty.
+std::string FormatSetTraceLogResult(const nlohmann::json& result)
+{
+    const bool cleared = result.value("cleared", false);
+    const bool hasCondition = result.value("hasCondition", false);
+    const std::string file = result.value("file", std::string());
+    const bool fileWithoutText = result.value("fileWithoutText", false);
+
+    std::ostringstream out;
+    if (cleared)
+        out << "Trace log cleared.";
+    else
+    {
+        out << "Trace log set" << (hasCondition ? ", conditional" : ", unconditional") << ".";
+        if (!file.empty())
+            out << " Output redirected to " << file << ".";
+    }
+    if (fileWithoutText)
+        out << " WARNING: a log file was set without log text; the file will stay empty until 'text' is set.";
+    return out.str();
+}
+
 // Human-readable summary of coverage.enable / coverage.disable: confirms
 // the address and, for 'enable', the granularity that was applied.
 // Coverage is tracked per memory page, so this always covers the whole
@@ -3549,6 +3574,100 @@ void RegisterDebuggerTools(ToolRegistry& registry, std::shared_ptr<PluginLink> l
         return result;
     };
     registry.Add(std::move(traceRecord));
+
+    Tool setTraceLog;
+    setTraceLog.name = "set_trace_log";
+    setTraceLog.description =
+        "Configure what x64dbg writes to the trace LOG for each "
+        "instruction executed while a trace is running — separate from "
+        "trace_record, which captures the complete binary instruction "
+        "trace. Workflow: call set_trace_log to choose what gets "
+        "recorded, optionally call trace_record to also capture the "
+        "full instruction trace, then run a trace with trace_until (or "
+        "debug_control) — the log fills in as the trace executes. Read "
+        "it back with read_log, or from the path in 'file' if one was "
+        "set. 'text' is an x64dbg format string using the syntax "
+        "'{type:expression}', evaluated fresh for each traced "
+        "instruction: '{p:cip} {i:cip}' logs each instruction's address "
+        "and disassembly, while '{p:cip}' alone logs just the address. "
+        "Omitting 'text' (or passing an empty string) clears both the "
+        "log text and 'condition'. 'condition' is an x64dbg expression, "
+        "the same language evaluate_expression uses; a line is logged "
+        "only when it evaluates to true, which lets you capture a "
+        "specific value at each step or, most usefully, reconstruct a "
+        "virtual machine's virtual program by logging its virtual "
+        "instruction pointer or context only when execution reaches the "
+        "VM's dispatcher, e.g. 'cip == 0x140001000' (numbers in "
+        "expressions are hex by default). Omitting 'condition' logs "
+        "every traced step. 'file' redirects the log to a path on the "
+        "machine running x64dbg, overwritten the next time a trace "
+        "starts; it does nothing without 'text' set, and the result's "
+        "'fileWithoutText' field flags that case. Requires an active "
+        "debugging session, and the log is only produced while a trace "
+        "is actually running.";
+    setTraceLog.inputSchema = {
+        {"$schema", "https://json-schema.org/draft/2020-12/schema"},
+        {"type", "object"},
+        {"properties", {
+            {"text", {
+                {"type", "string"},
+                {"description",
+                 "x64dbg format string logged for each traced instruction, using "
+                 "'{type:expression}' syntax. Example: '{p:cip} {i:cip}' logs the "
+                 "address and disassembly of each instruction; '{p:cip}' alone logs "
+                 "just the address. Omitted or empty clears the log text and "
+                 "'condition'."}
+            }},
+            {"condition", {
+                {"type", "string"},
+                {"description",
+                 "x64dbg expression evaluated on every traced step; the line is "
+                 "logged only when it is true. Same language as "
+                 "evaluate_expression. Example: to log only at a known VM "
+                 "dispatcher, use 'cip == 0x140001000' (numbers are hex by "
+                 "default). Omitted logs every traced step."}
+            }},
+            {"file", {
+                {"type", "string"},
+                {"description",
+                 "Path on the machine running x64dbg to redirect the log to; "
+                 "overwritten when the trace next starts. Has no effect unless "
+                 "'text' is also set."}
+            }}
+        }},
+        {"additionalProperties", false}
+    };
+    setTraceLog.handler = [link](const nlohmann::json& arguments) -> ToolResult
+    {
+        if (!link)
+            throw ToolError("set_trace_log: plugin link is not configured");
+
+        nlohmann::json params = nlohmann::json::object();
+        if (arguments.contains("text"))
+        {
+            if (!arguments["text"].is_string())
+                throw ToolError("set_trace_log: 'text' must be a string");
+            params["text"] = arguments["text"].get<std::string>();
+        }
+        if (arguments.contains("condition"))
+        {
+            if (!arguments["condition"].is_string())
+                throw ToolError("set_trace_log: 'condition' must be a string");
+            params["condition"] = arguments["condition"].get<std::string>();
+        }
+        if (arguments.contains("file"))
+        {
+            if (!arguments["file"].is_string())
+                throw ToolError("set_trace_log: 'file' must be a string");
+            params["file"] = arguments["file"].get<std::string>();
+        }
+
+        ToolResult result;
+        result.structuredContent = link->Call("trace.set_log", params);
+        result.text = FormatSetTraceLogResult(result.structuredContent);
+        return result;
+    };
+    registry.Add(std::move(setTraceLog));
 
     Tool runToUserCode;
     runToUserCode.name = "run_to_user_code";

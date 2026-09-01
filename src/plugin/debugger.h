@@ -473,6 +473,18 @@ bool TraceUntil(const std::string& mode, const std::string& condition, int maxSt
 // stored to the file. Requires active debugging.
 bool TraceRecordToFile(bool start, const std::string& filePath, std::string& error);
 
+// Sets the trace log: an x64dbg format-string expression (text) written for
+// every traced instruction where condition holds (or every instruction, if
+// condition is empty), optionally redirected to file. An empty text CLEARS
+// the current log text and condition — condition is ignored in that case.
+// fileWithoutText is set when file is non-empty but text is empty, i.e. a
+// log file was requested but there is no log text to write to it (per
+// x64dbg docs, TraceSetLogFile does nothing without log text). Requires
+// active debugging: TraceSetLog/TraceSetLogFile are debug-only commands (see
+// dbgcmdnew registration in external/x64dbg/src/dbg/x64dbg.cpp).
+bool SetTraceLog(const std::string& text, const std::string& condition, const std::string& file,
+                 bool& fileWithoutText, std::string& error);
+
 // Runs until user code is reached, using temporary memory breakpoints on
 // user code pages rather than single-stepping. Requires active debugging.
 // Documented limitation: fails if another RunToUserCode is already running.

@@ -11,7 +11,7 @@ An MCP server for the [x64dbg](https://x64dbg.com/) debugger. It gives an AI age
 - List running processes and attach the debugger to one already running, then detach again leaving it untouched.
 - Control execution: run, pause, stop, restart, run to an address, step into/over/out, and run until the program's own code is reached again.
 - Set, manage, and list breakpoints, software, hardware, and memory, with conditions and logging.
-- Trace execution and record code coverage, so analyzing packed or obfuscated code does not need one round trip per instruction.
+- Trace execution, record code coverage, and log a chosen expression at each traced instruction, so analyzing packed or obfuscated code does not need one round trip per instruction.
 - Search memory for byte patterns and list cross-references to an address.
 - List loaded modules, the memory map, threads, open handles, windows, and network connections.
 - Write to the debuggee: patch memory, assemble instructions in place, change registers, allocate and free memory, and run arbitrary x64dbg commands and scripts.
@@ -214,6 +214,7 @@ Running long stretches of the debuggee inside x64dbg itself instead of one MCP c
 |---|---|
 | `trace_until` | Steps the debuggee one instruction at a time inside the debugger until a condition is met or a step limit is reached. |
 | `trace_record` | Starts or stops recording every instruction the debuggee executes to a trace file. |
+| `set_trace_log` | Configures the log line written for each traced instruction: a format string, an optional condition, and an optional output file. |
 | `code_coverage` | Records which addresses were executed and how many times, then reads the counts back. |
 
 ### Commands and scripting
@@ -310,7 +311,7 @@ The C runtime is linked statically, so there is nothing extra to redistribute al
 
 ## Limitations
 
-Not implemented yet: configuring the log text and condition used during tracing. A handful of convenience tools that would bundle several existing calls into one — a post-halt snapshot, a one-call function breakdown, searching for immediate values, and a registers diff — are also planned but not built. Deliberately out of scope for now: working with types and structures, graphical interaction, managing x64dbg windows, and source-level debugging. See `docs/tools.md` for the full roadmap.
+Not implemented yet: a handful of convenience tools that would bundle several existing calls into one — a post-halt snapshot, a one-call function breakdown, searching for immediate values, and a registers diff. Deliberately out of scope for now: working with types and structures, graphical interaction, managing x64dbg windows, and source-level debugging. See `docs/tools.md` for the full roadmap.
 
 ## License
 

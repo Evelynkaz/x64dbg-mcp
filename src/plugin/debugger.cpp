@@ -64,6 +64,25 @@ std::string FormatHexAddress(unsigned long long address)
     return out.str();
 }
 
+// Quotes a command argument that may contain spaces or commas: wraps it in
+// double quotes and escapes any embedded double quote as \" (see the command
+// tokenizer state machine in commandparser.cpp). Format-string braces
+// ({p:cip}, {i:cip}, ...) are left intact — they are not escaped by this
+// quoting, only literal double quotes are.
+std::string QuoteCommandArg(const std::string& value)
+{
+    std::string out = "\"";
+    for (char c : value)
+    {
+        if (c == '"')
+            out += "\\\"";
+        else
+            out += c;
+    }
+    out += '"';
+    return out;
+}
+
 std::string PauseReasonToString(PauseReason reason)
 {
     switch (reason)
@@ -2730,6 +2749,64 @@ bool TraceRecordToFile(bool start, const std::string& filePath, std::string& err
     catch (...)
     {
         error = "Internal error while controlling trace recording";
+        return false;
+    }
+}
+
+bool SetTraceLog(const std::string& text, const std::string& condition, const std::string& file,
+                 bool& fileWithoutText, std::string& error)
+{
+    fileWithoutText = false;
+    try
+    {
+        if (!RequireDebugging(error))
+            return false;
+
+        if (text.empty())
+        {
+            // No arguments clears the current log text and condition (see
+            // cbDebugTraceSetLog in external/x64dbg/src/dbg/commands/cmd-tracing.cpp).
+            if (!DbgCmdExecDirect("TraceSetLog"))
+            {
+                error = "Failed to clear the trace log";
+                return false;
+            }
+        }
+        else if (condition.empty())
+        {
+            const std::string cmd = "TraceSetLog " + QuoteCommandArg(text);
+            if (!DbgCmdExecDirect(cmd.c_str()))
+            {
+                error = "Failed to set the trace log text: the debugger rejected \"" + cmd + "\"";
+                return false;
+            }
+        }
+        else
+        {
+            const std::string cmd = "TraceSetLog " + QuoteCommandArg(text) + ", " + QuoteCommandArg(condition);
+            if (!DbgCmdExecDirect(cmd.c_str()))
+            {
+                error = "Failed to set the trace log text/condition: the debugger rejected \"" + cmd + "\"";
+                return false;
+            }
+        }
+
+        if (!file.empty())
+        {
+            fileWithoutText = text.empty();
+            const std::string cmd = "TraceSetLogFile " + QuoteCommandArg(file);
+            if (!DbgCmdExecDirect(cmd.c_str()))
+            {
+                error = "Failed to set the trace log file: the debugger rejected \"" + cmd + "\"";
+                return false;
+            }
+        }
+
+        return true;
+    }
+    catch (...)
+    {
+        error = "Internal error while setting the trace log";
         return false;
     }
 }
